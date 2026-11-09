@@ -19,6 +19,10 @@ import { stopBoss } from "@aihot/backend/jobs/queue";
 import { latestHotRanking } from "@aihot/backend/publication/hot";
 import { storyTexts } from "@aihot/backend/publication/story-text";
 import { storyAnswer } from "@aihot/backend/publication/agent";
+import { factSources } from "@aihot/backend/publication/coverage";
+import { loadPool } from "@aihot/backend/publication/pool";
+import { digestReports } from "@aihot/backend/publication/story-evidence";
+import { publishArticle } from "@aihot/backend/publication/publish";
 
 const key = `evidence-${tag()}`;
 const now = new Date();
@@ -204,6 +208,60 @@ test("item detail counts the same fact evidence as its expanded group", async ()
   assert.equal(expanded.reports.length, 2);
   assert.equal(detail.item.group!.reportCount, expanded.reports.length);
   assert.equal(detail.item.group!.additionalSourceCount, 1);
+});
+
+// A copy (editorial/copies.ts) is never listed itself, but its source did report the fact.
+test("a copy counts toward its fact's coverage everywhere it is counted, and is listed nowhere", async () => {
+  const s = await source("copy-original", "T1");
+  const other = await source("copy-reprint", "T2");
+  const g = await story();
+  const main = await report(s, g, { title: "原文报道", hours: 3 });
+  const copy = await report(other, g, { title: "转载报道", hours: 2, selected: false });
+  const own = `${key}-copy`;
+  await sql`UPDATE publications SET tags = ${[own]} WHERE article_id = ${main}`;
+  await sql`UPDATE analyses SET tags = ${[own]}, output = output || jsonb_build_object('copyOf', ${main}::text) WHERE article_id = ${copy}`;
+  await publishArticle(copy);
+
+  const detail = await loadItemDetail(main, "zh", now);
+  assert.ok(detail.kind === "found");
+  assert.deepEqual([detail.item.group!.reportCount, detail.item.group!.additionalSourceCount], [2, 1]);
+  const expanded = (await loadGroupReports({ factPublicId: g.factPublicId, channel: "all", category: null, tag: own }, now))!;
+  assert.deepEqual(expanded.reports.map((r) => r.id).sort(), [main, copy].sort());
+  const card = (await loadTimeline({ channel: "all", category: null, tag: own, now })).cards.find((c) => c.key === `f${g.factId}`)!;
+  assert.deepEqual([card.item.id, card.group!.reportCount, card.group!.additionalSourceCount], [main, 2, 1]);
+  assert.deepEqual((await factSources([g.factId], now)).get(g.factId)?.sort(), [other, s].sort());
+
+  assert.deepEqual((await loadPool({ channel: "all", category: null, tag: own, now })).items.map((i) => i.id), [main]);
+  assert.deepEqual((await digestReports(sql, [g.storyId], now)).map((r) => r.id), [main], "the original's words stand for it");
+
+  await sql`UPDATE publications SET visibility = 'withdrawn' WHERE article_id = ${copy}`;
+  assert.deepEqual((await factSources([g.factId], now)).get(g.factId), [s], "a withdrawn copy stops counting");
+  const after = await loadItemDetail(main, "zh", now);
+  assert.ok(after.kind === "found");
+  assert.equal(after.item.group!.reportCount, 1);
+});
+
+// Coverage leaves out only what keeps a copy out of lists: what would keep its material out (a block,
+// a source no longer editorial) keeps it out of the count too.
+test("a copy its own judgement or source would not list is no coverage either", async () => {
+  const s = await source("copy-scope-original", "T1");
+  const other = await source("copy-scope-reprint", "T2");
+  const g = await story();
+  const main = await report(s, g, { title: "原文报道", hours: 3 });
+  const copy = await report(other, g, { title: "转载报道", hours: 2, selected: false });
+  await sql`UPDATE analyses SET output = output || jsonb_build_object('copyOf', ${main}::text) WHERE article_id = ${copy}`;
+  const counted = async () => {
+    await publishArticle(copy);
+    const detail = await loadItemDetail(main, "zh", now);
+    assert.ok(detail.kind === "found");
+    return [(await factSources([g.factId], now)).get(g.factId)?.length, detail.item.group!.reportCount];
+  };
+  assert.deepEqual(await counted(), [2, 2]);
+  await sql`UPDATE analyses SET relevance = 'block' WHERE article_id = ${copy}`;
+  assert.deepEqual(await counted(), [1, 1], "a blocked copy");
+  await sql`UPDATE analyses SET relevance = 'pass' WHERE article_id = ${copy}`;
+  await sql`UPDATE sources SET participation_mode = 'hot_signal' WHERE id = ${other}`;
+  assert.deepEqual(await counted(), [1, 1], "a copy from a source that only signals heat");
 });
 
 // A newer archive report may remain readable without qualifying as news. It cannot become the

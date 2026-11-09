@@ -16,7 +16,8 @@
 // reports and by the posts already attached to a fact; one that found no story gets another look,
 // while it still counts for heat, whenever a fact close to it gains evidence (rematchSignals). History
 // (isHistorical) founds no event. A report about to open a card is compared with the cards readers
-// already see (cards.ts). Runs serially (queue concurrency 1).
+// already see (cards.ts). A copy of an article another source already had judged (editorial/copies.ts)
+// joins its original's fact without a judgement (joinOriginal). Runs serially (queue concurrency 1).
 import { modelFor, modelRoute } from "../editorial/models.ts";
 import { beijingDate, beijingMidnight } from "@aihot/contracts/time";
 import { sql, type Db, type Tx } from "../db.ts";
@@ -221,7 +222,7 @@ async function markGrouped(articleId: string, revision: number, selection?: Sele
 export interface GroupResult {
   verdict:
     | "same-fact" | "same-card" | "same-url" | "new-fact-in-story" | "new-story" | "roundup" | "kept" | "standalone" | "manual" | "skipped"
-    | "signal" | "signal-native" | "signal-unmatched" | "historical";
+    | "copy" | "signal" | "signal-native" | "signal-unmatched" | "historical";
   factId?: number;
   storyId?: number;
   /** Stories compared because this report tied them together (see consolidate). */
@@ -356,6 +357,7 @@ async function decide(articleId: string, opts: GroupOptions, revision: number, r
     await markGrouped(articleId, a.revision, { addsValue: false, reason: "材料不足以确认当前消息" });
     return { verdict: "standalone" };
   }
+  if (an?.output?.copyOf) return joinOriginal(a, String(an.output.copyOf), composite, source, observedAt);
 
   const kept = await currentMembership(articleId);
   // A material revision clears its value decision, but keeps its established membership. Reuse
@@ -568,6 +570,40 @@ async function decide(articleId: string, opts: GroupOptions, revision: number, r
   // The fact, new or not, may now be what earlier discussion posts were about in other words.
   await rematch(result, articleId, reportText(title, an.summary_zh), written.factId!, SIGNAL_MIN_COSINE);
   return result;
+}
+
+/**
+ * A copy is its original's report: it joins the fact the original reports, with its heat, mentions
+ * what a composite original mentions, or stays alone beside a standalone one, as the original stands
+ * each time the copy is grouped. No judgement is asked, and it adds no selection value (the original
+ * holds the place in lists). An editor's decision wins here too.
+ */
+async function joinOriginal(a: ArticleRow, originalId: string, composite: boolean, source: { id: string; signal_group_id: string | null }, observedAt: Date): Promise<GroupResult> {
+  const target = composite ? null : await currentMembership(originalId);
+  const manual = await sql.begin(async (tx) => {
+    await lockCurrentRevision(tx, a.id, a.revision);
+    const late = await manualDecision(tx, a.id);
+    if (late) {
+      await markGrouped(a.id, a.revision, { addsValue: true, reason: "人工确认的归属" }, tx);
+      return late;
+    }
+    await resetAutomatic(tx, a.id);
+    if (composite) {
+      await tx`INSERT INTO fact_articles (fact_id, article_id, role, created_at)
+               SELECT fa.fact_id, ${a.id}, 'mention', ${observedAt} FROM fact_articles fa WHERE fa.article_id = ${originalId} AND fa.role = 'mention'`;
+    } else if (target) {
+      await recordSignal(tx, target.storyId, a.id, source, "editorial", observedAt);
+      const joined = await tx`INSERT INTO fact_articles (fact_id, article_id, role, evidence, created_at)
+        SELECT fa.fact_id, ${a.id}, 'report', fa.evidence, ${observedAt} FROM fact_articles fa WHERE fa.fact_id = ${target.factId} AND fa.article_id = ${originalId}
+        RETURNING fact_id`;
+      if (!joined.length) throw new Error("Grouping target changed; retry against the original's current fact");
+    }
+    await recordDecision(tx, a.id, target?.factId ?? null, target?.storyId ?? null, "copy", [], null);
+    await markGrouped(a.id, a.revision, { addsValue: false, reason: "转载，原文已在" }, tx);
+    return null;
+  });
+  if (manual) return { verdict: "manual", factId: manual.factId };
+  return { verdict: "copy", ...(target ? { factId: target.factId, storyId: target.storyId } : {}) };
 }
 
 /** How long a discussion post waits for the post it replies to or quotes. */

@@ -22,7 +22,7 @@ test("an unresolved current identity does not start a separate writing request",
   const text = "We released Manus 2.0 on September 28. Today we explain Game Dev's editing workflow.";
   await assert.rejects(runAnalysis({ id: `identity-${tag()}`, revision: 1, title: "Manus Game Dev", url: "https://example.org/news", author: null,
     publishedAt: new Date("2026-10-02T00:00:00Z"), bodyStatus: "ok", bodyText: text, excerpt: null, media: [], xPost: null,
-    source: { name: "Fixture", kind: "rss", tier: "T1", firstParty: true } }));
+    source: { id: "fixture", name: "Fixture", kind: "rss", tier: "T1", firstParty: true } }));
   assert.ok(steps.includes("structure"));
   assert.equal(steps.filter((s) => s === "understand" || s === "summarize").length, 0);
 });
