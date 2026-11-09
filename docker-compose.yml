@@ -78,7 +78,8 @@ services:
     restart: unless-stopped
     shm_size: 1g
     environment:
-      # Without a token the server listens only inside its own container.
+      # Required: without a token Crawl4AI answers no one outside its container, and the worker sends
+      # nothing without one (the page being rendered must not be able to drive the service).
       CRAWL4AI_API_TOKEN: ${RENDER_TOKEN:-}
     networks: [render]
 

@@ -85,7 +85,7 @@ COMPOSE_PROFILES=render
 
 再 `docker compose up -d`。有了 `COMPOSE_PROFILES`，以后每次 `docker compose up` 都会带上 `render`，不用写 `--profile render`。它跑一个 Chromium，至少留 1 GB 内存。
 
-`RENDER_TOKEN` 一定要设：Crawl4AI 没有令牌时只在自己的容器里监听，worker 连不上。渲染服务连不上、超时、拒绝令牌或者回答看不懂时，worker 日志里记一条 `render service failed`；某一页渲染不出来（人机验证、下载文件，Crawl4AI 回答 500 或 504）不记。两种情况正文都照常交给 Jina。镜像版本固定写在 `docker-compose.yml` 里，升级前先看 Crawl4AI 的更新说明。
+`RENDER_TOKEN` 一定要设：没有令牌时 worker 不调用渲染服务（日志里记一次 `render service not used`），Crawl4AI 也只在自己的容器里监听；有了令牌，被渲染的网页自己也驱动不了这个服务。渲染出来超过 8 MB 的网页不用，和直接抓取的上限一样。渲染服务连不上、超时、拒绝令牌或者回答看不懂时，worker 日志里记一条 `render service failed`；某一页渲染不出来（人机验证、下载文件，Crawl4AI 回答 500 或 504）不记。两种情况正文都照常交给 Jina。镜像版本固定写在 `docker-compose.yml` 里，升级前先看 Crawl4AI 的更新说明。
 
 ### 更新
 
