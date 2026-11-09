@@ -289,6 +289,27 @@ docker compose logs -f --tail 100 api worker web
 3. 量大的步骤换便宜的模型：`.env` 里可以每一步单独选（`PREFILTER_MODEL`、`SCORE_MODEL`、`STRUCTURE_MODEL`……），也能在“模型与评测”页改。换评分模型之前，用 `scripts/eval-selection.ts` 在同一批样本上比一比，别省了钱却选不准。
 4. 少放进无关的资料：花费基本跟每天进来的条数成正比。综合新闻站尽量只订和你方向相关的栏目，在“信源”页调低更新频率，暂停量大却很少入选的信源。
 
+### 后台的费用怎么算
+
+“模型与评测”页最上面是这段时间所有付费请求的费用合计，按币种分开。服务商返回了金额的照记（比如极致了）；没返回的，客户端按计费单位推算（Jina 按 token、SocialData 按条数）；模型调用大多不返回金额，按你填的单价推算。下面先是每一步模型的明细，最后的“其他付费请求”是向量、读网页、X 和公众号这类不属于某一步模型的请求。
+
+没有金额也没有单价的调用显示“未定价”，不计入合计。单价写在数据库的 `service_prices` 表里，每百万 token 一个价，按服务商的价格页填：
+
+```bash
+docker compose exec -T db psql -U aihot aihot <<'SQL'
+INSERT INTO service_prices (service, model, currency, input_per_mtok, cached_per_mtok, output_per_mtok)
+VALUES ('deepseek', 'deepseek-flash', 'CNY', 1.0, 0.1, 2.0)
+ON CONFLICT (service, model) DO UPDATE
+  SET currency = EXCLUDED.currency, input_per_mtok = EXCLUDED.input_per_mtok,
+      cached_per_mtok = EXCLUDED.cached_per_mtok, output_per_mtok = EXCLUDED.output_per_mtok, updated_at = now();
+SQL
+```
+
+- 上面的数字是示例，不是哪家服务商的真实价格。
+- `service`、`model` 和 `site/models.ts` 里预设的写法一样；默认预设的 `service` 是 `llm`，`model` 是 `LLM_MODEL` 的值。`model` 填 `''` 表示这个服务的所有模型都按这一个价。向量请求的 `service` 是 `dashscope`，设了自己的向量服务时是 `embedding`。
+- `currency` 只能是 `CNY` 或 `USD`。`cached_per_mtok` 不填时，命中缓存的 token 也按输入价算。
+- 估算不存下来，每次打开页面按当时的单价算，所以改了单价，过去的调用也按新价显示。
+
 ## 不用 Docker
 
 需要 Node.js 24.11 以上和 PostgreSQL 16 或 17，系统用 Linux 或 macOS；Windows 上请在 WSL2 里运行，或者用上面的 Docker 方式。

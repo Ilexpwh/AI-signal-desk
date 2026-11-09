@@ -396,14 +396,24 @@ export interface AdminModelUsage {
   p95: number | null;
   tokensIn: number;
   tokensOut: number;
+  /** What the provider billed, as it reported. */
   actualCost: number | null;
+  /** What the provider client worked out from the billed units (pages, tokens, objects). */
+  estimatedCost: number | null;
   currency: string | null;
+  /** Calls without a cost of their own, at the operator's unit prices (`service_prices`). */
   estimate: { amount: number; currency: string } | null;
+  /** Answered calls that neither carry a cost nor have a unit price. */
+  unpriced: number;
 }
 
 export interface AdminModels {
   days: number;
   capabilities: Array<{ key: string; label: string; env: string; defaultModel: string; vision: boolean; current: { model: string; source: "admin" | "env" | "default"; invalid?: string }; fallback: { model: string; primaryPaused: boolean; backupPaused: boolean; nextProbeAt: string | null } | null; usage: AdminModelUsage[] }>;
+  /** Paid requests outside the model steps: embeddings, page reading, X and WeChat lookups. */
+  others: Array<Omit<AdminModelUsage, "promptVersion"> & { service: string }>;
+  /** Every paid request of the window, per currency; `estimated` is the part not billed as such. */
+  totals: { costs: Array<{ currency: string; actual: number; estimated: number }>; unpriced: number };
   choices: Array<{ key: string; service: string; vision: boolean }>;
   history: Array<{ at: Timestamp; actor: string; subject: string; reason: string | null; before: { model: string; source: string } | null; after: { model: string; source: string } | null }>;
   benches: Array<{ id: string; label: string; sample_size: number; prompt_version: string | null; models: string[]; created_at: Timestamp }>;

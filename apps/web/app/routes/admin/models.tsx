@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { Link } from "react-router";
 import type { Route } from "./+types/models";
-import type { AdminModels } from "@aihot/contracts/admin";
+import type { AdminModelUsage, AdminModels } from "@aihot/contracts/admin";
 import { SITE } from "@aihot/site";
 import { adminGet } from "../../lib/admin.server";
 import { useAdminAction } from "../../features/admin/action";
 import { bj, money, num } from "../../features/admin/format";
-import { AdminPage, Badge, Button, Card, DataTable, Empty, Field, FilterChips, ReasonDialog, Select } from "../../features/admin/ui";
+import { AdminPage, Badge, Button, Card, DataTable, Empty, Field, FilterChips, ReasonDialog, Select, Stat } from "../../features/admin/ui";
+import type { Column } from "../../features/admin/ui";
 
 
 
@@ -25,6 +26,42 @@ function Unpriced() {
 }
 const secs = (ms: number | null) => (ms == null ? "—" : ms >= 10_000 ? `${Math.round(ms / 1000)} s` : `${(ms / 1000).toFixed(1)} s`);
 
+type Usage = Omit<AdminModelUsage, "promptVersion">;
+
+/** What a group of calls cost: as billed, as the client worked out, and at your unit prices. */
+function Cost({ u }: { u: Usage }) {
+  const currency = u.currency ?? "CNY";
+  const parts = [
+    u.actualCost !== null && <span key="a">{money(u.actualCost, currency)}</span>,
+    u.estimatedCost !== null && <span key="e" title="服务商没有返回金额，按计费的页数、token 或条数推算">≈ {money(u.estimatedCost, currency)}</span>,
+    u.estimate && <span key="p" title="按用量 × 单价推算">≈ {money(u.estimate.amount, u.estimate.currency)}</span>,
+  ].filter(Boolean);
+  if (!parts.length) return u.unpriced ? <Unpriced /> : <span className="text-ink-4">—</span>;
+  return (
+    <span className="whitespace-nowrap">
+      {parts.flatMap((part, i) => (i ? [" + ", part] : [part]))}
+      {u.unpriced > 0 && <span className="text-ink-4" title="服务商没有返回费用，也没有单价，未计入">（另 {num(u.unpriced)} 次未定价）</span>}
+    </span>
+  );
+}
+
+const usageColumns: Column<Usage>[] = [
+  { key: "p", label: "用途", render: (u) => <span className="whitespace-nowrap font-mono text-[11.5px] text-ink-3">{u.purpose}</span> },
+  { key: "c", label: "调用", align: "right", render: (u) => num(u.calls) },
+  {
+    key: "ok",
+    label: "成功率",
+    align: "right",
+    render: (u) => {
+      const rate = u.calls ? u.ok / u.calls : 0;
+      return <span className={rate < 0.95 ? "text-hot" : ""} title={`失败 ${u.failed} · 结果未知 ${u.unknown}`}>{`${Math.round(rate * 1000) / 10}%`}</span>;
+    },
+  },
+  { key: "l", label: "耗时 p50 / p95", align: "right", render: (u) => <span className="whitespace-nowrap">{`${secs(u.p50)} / ${secs(u.p95)}`}</span> },
+  { key: "t", label: "输入 / 输出 token", align: "right", render: (u) => <span className="whitespace-nowrap">{`${num(u.tokensIn)} / ${num(u.tokensOut)}`}</span> },
+  { key: "$", label: "费用", align: "right", render: (u) => <Cost u={u} /> },
+];
+
 export default function ModelsAdmin({ loaderData: m }: Route.ComponentProps) {
   const { run, pending } = useAdminAction();
   const [target, setTarget] = useState<AdminModels["capabilities"][number] | null>(null);
@@ -37,6 +74,27 @@ export default function ModelsAdmin({ loaderData: m }: Route.ComponentProps) {
       subtitle="每项能力当前用哪个模型、来自哪里（后台切换 > 环境变量 > 代码默认），以及近期的成功率、耗时与费用。切换只影响之后的新任务，已有结果不重算；换精选模型前先看 SelectBench 同批对比。"
       actions={<FilterChips param="days" options={[{ value: "1", label: "24 小时" }, { value: "", label: "7 天" }, { value: "30", label: "30 天" }]} />}
     >
+      <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
+        {m.totals.costs.length ? (
+          m.totals.costs.map((c) => (
+            <Stat
+              key={c.currency}
+              label={`${m.days} 天费用（${c.currency}）`}
+              value={money(c.actual + c.estimated, c.currency)}
+              hint={c.estimated ? `其中估算 ${money(c.estimated, c.currency)}` : "全部是服务商返回的金额"}
+            />
+          ))
+        ) : (
+          <Stat label={`${m.days} 天费用`} value="—" hint="没有记到费用" />
+        )}
+        <Stat
+          label="未定价调用"
+          value={num(m.totals.unpriced)}
+          tone={m.totals.unpriced ? "warn" : undefined}
+          hint={m.totals.unpriced ? "没有费用也没有单价，未计入合计" : "每次调用都有费用或单价"}
+        />
+      </div>
+
       <div className="grid grid-cols-1 gap-5">
         {m.capabilities.map((c) => {
           const total = c.usage.reduce((a, u) => a + u.calls, 0);
@@ -78,32 +136,7 @@ export default function ModelsAdmin({ loaderData: m }: Route.ComponentProps) {
                   columns={[
                     { key: "m", label: "模型", render: (u) => <span className="whitespace-nowrap font-mono text-[12px]">{u.model}</span> },
                     { key: "v", label: "提示版本", render: (u) => <span className="whitespace-nowrap font-mono text-[11.5px] text-ink-3">{u.promptVersion ?? "—"}</span> },
-                    { key: "p", label: "用途", render: (u) => <span className="whitespace-nowrap font-mono text-[11.5px] text-ink-3">{u.purpose}</span> },
-                    { key: "c", label: "调用", align: "right", render: (u) => num(u.calls) },
-                    {
-                      key: "ok",
-                      label: "成功率",
-                      align: "right",
-                      render: (u) => {
-                        const rate = u.calls ? u.ok / u.calls : 0;
-                        return <span className={rate < 0.95 ? "text-hot" : ""} title={`失败 ${u.failed} · 结果未知 ${u.unknown}`}>{`${Math.round(rate * 1000) / 10}%`}</span>;
-                      },
-                    },
-                    { key: "l", label: "耗时 p50 / p95", align: "right", render: (u) => <span className="whitespace-nowrap">{`${secs(u.p50)} / ${secs(u.p95)}`}</span> },
-                    { key: "t", label: "输入 / 输出 token", align: "right", render: (u) => <span className="whitespace-nowrap">{`${num(u.tokensIn)} / ${num(u.tokensOut)}`}</span> },
-                    {
-                      key: "$",
-                      label: "费用",
-                      align: "right",
-                      render: (u) =>
-                        u.actualCost !== null ? (
-                          `${money(u.actualCost)}${u.currency && u.currency !== "CNY" ? ` ${u.currency}` : ""}`
-                        ) : u.estimate ? (
-                          <span title="按用量 × 单价推算">≈ {money(u.estimate.amount)}{u.estimate.currency !== "CNY" ? ` ${u.estimate.currency}` : ""}</span>
-                        ) : (
-                          <Unpriced />
-                        ),
-                    },
+                    ...usageColumns,
                   ]}
                 />
               ) : (
@@ -113,6 +146,23 @@ export default function ModelsAdmin({ loaderData: m }: Route.ComponentProps) {
           );
         })}
       </div>
+
+      <Card title="其他付费请求" className="mt-5" pad={false}>
+        {m.others.length ? (
+          <DataTable
+            dense
+            rows={m.others}
+            rowKey={(u) => `${u.service}|${u.model}|${u.purpose}`}
+            columns={[
+              { key: "s", label: "服务", render: (u) => <span className="whitespace-nowrap font-mono text-[12px]">{u.service}</span> },
+              { key: "m", label: "模型", render: (u) => <span className="whitespace-nowrap font-mono text-[11.5px] text-ink-3">{u.model ?? "—"}</span> },
+              ...usageColumns,
+            ]}
+          />
+        ) : (
+          <Empty>{m.days} 天内没有向量、读网页、X 和公众号这类付费请求</Empty>
+        )}
+      </Card>
 
       <div className="mt-5 grid grid-cols-1 gap-5 xl:grid-cols-2">
         <Card title="切换记录" pad={false}>
