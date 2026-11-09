@@ -14,7 +14,8 @@ export async function registerEventJobs(boss: PgBoss) {
     // A discussion post comes here straight from collection: record it first (settleNonEditorial).
     if (signalOnly && !(await settleNonEditorial(articleId)).group) return { verdict: "skipped" };
     const result = await groupArticle(articleId, { signalOnly, regroup });
-    if (result.storyId && !result.verdict.startsWith("signal")) {
+    // A copy is no digest input (it lists nothing of its own): the story's digest stays as it is.
+    if (result.storyId && !result.verdict.startsWith("signal") && result.verdict !== "copy") {
       await enqueue(QUEUES.digest, { storyId: result.storyId }, { singletonKey: `story:${result.storyId}`, startAfter: 60 });
     }
     return result;

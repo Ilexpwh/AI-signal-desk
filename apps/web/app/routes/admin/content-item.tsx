@@ -96,6 +96,11 @@ export default function ContentItem({ loaderData }: Route.ComponentProps) {
       <div className="mb-5 flex flex-wrap gap-1.5">
         {p ? <Badge tone={p.visibility === "public" ? "ok" : "warn"}>{VISIBILITY_LABEL[p.visibility] ?? p.visibility}</Badge> : <Badge>未公开</Badge>}
         {p?.selected && <Badge tone="accent">精选</Badge>}
+        {a.copy_of && (
+          <Link to={`/admin/content/${encodeURIComponent(a.copy_of)}`}>
+            <Badge tone="info" title={`沿用原文的判断，指纹相差 ${a.copy_distance} 位`}>转载</Badge>
+          </Link>
+        )}
         {p?.eligible === false && <Badge>不进公开面</Badge>}
         {a.backfill && <Badge tone="warn">历史回灌</Badge>}
         <Badge>处理 {a.processing_state}</Badge>
@@ -143,6 +148,11 @@ export default function ContentItem({ loaderData }: Route.ComponentProps) {
               </div>
             </Step>
             <Step title="模型判断" meta={`${c.analyses.length} 次`} tone={c.analyses.length ? "accent" : "muted"}>
+              {a.copy_of && (
+                <div className="mb-3 text-[12.5px] text-ink-3">
+                  转载：和<Link className="text-accent" to={`/admin/content/${encodeURIComponent(a.copy_of)}`}>原文</Link>的指纹相差 {a.copy_distance} 位，沿用原文的判断，没有调用模型，也不单独进公开池和精选。“重新评估”会按它自己的全文判断。
+                </div>
+              )}
               {c.analyses.length ? (
                 <div className="space-y-3">
                   {c.analyses.map((an) => (
@@ -170,6 +180,20 @@ export default function ContentItem({ loaderData }: Route.ComponentProps) {
                 </div>
               ) : (
                 <span className="text-ink-4">{a.participation_mode === "editorial" ? "还没有判断（等待队列或失败）" : "氛围信源不做编辑判断"}</span>
+              )}
+              {c.copies.length > 0 && (
+                <div className="mt-3">
+                  <div className="text-[12px] text-ink-4">被转载 {c.copies.length} 次，转载沿用这条的判断</div>
+                  <ul className="mt-1 space-y-1">
+                    {c.copies.map((copy) => (
+                      <li key={copy.id} className="flex gap-2">
+                        <span className="num shrink-0 text-ink-4">{bj(copy.discovered_at)}</span>
+                        <Link className="min-w-0 flex-1 truncate text-ink hover:text-accent" to={`/admin/content/${encodeURIComponent(copy.id)}`}>{copy.title}</Link>
+                        <span className="shrink-0 text-ink-3">{copy.source_name} · 相差 {copy.distance} 位</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               )}
             </Step>
             <Step title="公开" tone={p ? (p.visibility === "withdrawn" ? "bad" : "accent") : "muted"} meta={p ? `更新于 ${bj(p.updated_at, true)}` : undefined}>

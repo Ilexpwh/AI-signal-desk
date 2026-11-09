@@ -14,6 +14,9 @@ import { publishArticleTx, setSeoDecision } from "../publication/publish.ts";
 import { emit } from "../modules.ts";
 import { requestRegroup } from "../events/corrections.ts";
 import { resetAutomatic } from "../events/group.ts";
+import { RECALL_DAYS } from "../events/recall.ts";
+import { groupingReset } from "../content/provenance.ts";
+import { latestCopyCondition } from "../publication/scope.ts";
 import { materialIdentityForUrl, contentHash, decideTimeline, explicitBackfill, isHistorical, updatePresentation, type MediaItem } from "../content/materials.ts";
 import { extractFromUrl, pageFetchable, pageRules } from "../content/extract.ts";
 import { PresentationMismatch, presentationCounts, rebaseTranslation } from "../content/presentation.ts";
@@ -199,10 +202,13 @@ export async function contentChain(id: string): Promise<Chain | null> {
   const [article] = await sql<Chain["article"][]>`
     SELECT a.id, a.source_id, a.url, a.identity_key, a.title, a.author, a.language, a.published_at, a.published_at_claim, a.discovered_at,
            a.timeline_at, a.backfill, a.body_status, a.revision, a.processing_state, a.processing_error, a.grouped_at, length(a.body_text) AS body_chars,
-           s.name AS source_name, s.kind AS source_kind, s.tier, s.participation_mode, s.site_fulltext, s.syndicate_fulltext
-    FROM articles a JOIN sources s ON s.id = a.source_id WHERE a.id = ${id}`;
+           s.name AS source_name, s.kind AS source_kind, s.tier, s.participation_mode, s.site_fulltext, s.syndicate_fulltext,
+           an.output->>'copyOf' AS copy_of, (an.output->>'distance')::int AS copy_distance
+    FROM articles a JOIN sources s ON s.id = a.source_id
+    LEFT JOIN LATERAL (SELECT x.output FROM analyses x WHERE x.article_id = a.id ORDER BY x.input_revision DESC, x.id DESC LIMIT 1) an ON true
+    WHERE a.id = ${id}`;
   if (!article) return null;
-  const [discoveries, revisions, analyses, publication, override, ledger, membership, decisions, deliveries, history] = await Promise.all([
+  const [discoveries, revisions, analyses, publication, override, ledger, membership, decisions, deliveries, history, copies] = await Promise.all([
     sql<Chain["discoveries"]>`SELECT source_id, via, discovered_at FROM article_discoveries WHERE article_id = ${id} ORDER BY discovered_at`,
     sql<Chain["revisions"]>`SELECT revision, title, content_hash, created_at FROM article_revisions WHERE article_id = ${id} ORDER BY revision DESC LIMIT 10`,
     sql<Chain["analyses"]>`
@@ -220,8 +226,17 @@ export async function contentChain(id: string): Promise<Chain | null> {
     sql<Chain["decisions"]>`SELECT verdict, fact_id, story_id, receipt_id, candidates, created_at FROM grouping_decisions WHERE article_id = ${id} ORDER BY created_at DESC LIMIT 5`,
     sql<Chain["deliveries"]>`SELECT target_key, dedupe_key, status, attempts, response, created_at, sent_at FROM deliveries WHERE subject_id = ${id} ORDER BY created_at DESC`,
     auditHistory(`content:${id}`),
+    // A copy is judged while its original lies in the recall window, so it was discovered within that
+    // window around the original's discovery; fingerprinted material is indexed by discovery.
+    sql<Chain["copies"]>`
+      SELECT c.id, coalesce(p.title, c.title) AS title, s.name AS source_name, (an.output->>'distance')::int AS distance, c.discovered_at
+      FROM articles c JOIN sources s ON s.id = c.source_id LEFT JOIN publications p ON p.article_id = c.id
+      JOIN LATERAL (SELECT x.output FROM analyses x WHERE x.article_id = c.id ORDER BY x.input_revision DESC, x.id DESC LIMIT 1) an ON an.output->>'copyOf' = ${id}
+      WHERE c.simhash IS NOT NULL AND c.discovered_at BETWEEN ${article.discovered_at}::timestamptz - make_interval(days => ${RECALL_DAYS})
+        AND ${article.discovered_at}::timestamptz + make_interval(days => ${RECALL_DAYS})
+      ORDER BY c.discovered_at, c.id`,
   ]);
-  return { article, discoveries, revisions, analyses, publication: publication[0] ?? null, override: override[0] ?? null, ledger, membership, decisions, deliveries, history };
+  return { article, discoveries, revisions, analyses, publication: publication[0] ?? null, override: override[0] ?? null, ledger, membership, decisions, deliveries, history, copies };
 }
 
 /** Whether the current hot ranking shows the article: as an event's representative or among its reports. */
@@ -349,6 +364,13 @@ export async function rerun(id: string, step: AdminRerun["step"], requestId: str
     let jobId: string | null;
     if (step === "group") jobId = await requestRegroup(id, requestId, tx);
     else {
+      // A copy joined its original's fact without a judgement: judged in full now, it is grouped afresh too.
+      if (step === "analyze" && (await tx`SELECT 1 WHERE ${latestCopyCondition(sql`${id}`)}`).length) {
+        await resetAutomatic(tx, id);
+        await tx`UPDATE articles SET ${groupingReset()} WHERE id = ${id}`;
+        const published = await publishArticleTx(tx, id);
+        if (published?.changed) await emit("articleChanged", { id, kind: "content", reduced: published.reduced, reason: "copy re-evaluated" }, tx);
+      }
       await tx`UPDATE articles SET processing_state = 'new', processing_error = NULL, processing_attempts = 0, processing_retry_at = NULL,
                   body_status = CASE WHEN ${step === "extract"} THEN 'pending' ELSE body_status END WHERE id = ${id}`;
       jobId = await queueProcessing(id, { step, ...(step === "analyze" ? { attemptTag: `admin:${requestId}` } : {}), db: tx });

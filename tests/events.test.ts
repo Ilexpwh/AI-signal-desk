@@ -1,7 +1,8 @@
 // Event grouping invariants: an editor's decision made while the model is deciding stands; a
 // revision keeps its membership without asking the model; an explicit regroup drops the automatic
 // membership at once and decides again; a story's root is its earliest fact that still holds reports;
-// two stories a report ties together merge only when both models see one story in their roots.
+// two stories a report ties together merge only when both models see one story in their roots; a copy
+// of an article another source had judged joins its original's place without a judgement.
 import { embeddingsStub, gate, stub, tag } from "./setup.ts";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -18,6 +19,7 @@ import { publishArticle } from "@aihot/backend/publication/publish";
 
 const T = tag();
 const SOURCE = `test-events-${T}`;
+const REPRINTER = `test-events-reprinter-${T}`;
 const FACT_TITLE = `测试事件${T}发布新模型`;
 
 // The model calls the first candidate the same occurrence (and, asked about a pair, agrees), but
@@ -83,7 +85,8 @@ async function setScope(articleId: string, scope: "single" | "composite", fact: 
 }
 
 before(async () => {
-  await sql`INSERT INTO sources (id, name, kind, tier, participation_mode, next_fetch_at) VALUES (${SOURCE}, 'Test events', 'rss', 'T1', 'editorial', '2100-01-01')`;
+  await sql`INSERT INTO sources (id, name, kind, tier, participation_mode, next_fetch_at) VALUES (${SOURCE}, 'Test events', 'rss', 'T1', 'editorial', '2100-01-01'),
+    (${REPRINTER}, 'Test reprints', 'rss', 'T2', 'editorial', '2100-01-01')`;
   // An existing fact with one report: the candidate every later report meets.
   const [story] = await sql<{ id: number }[]>`INSERT INTO stories (public_id, title, first_report_at, latest_at) VALUES (${randomUUID()}, ${FACT_TITLE}, now(), now()) RETURNING id`;
   storyId = story!.id;
@@ -637,4 +640,71 @@ test("stories that reports keep tying together without merging list each other a
     pairRelation = null;
     answerAll = false;
   }
+});
+
+/** Another source's copy of `original`, carrying its judgement as the copy gate writes it (editorial/copies.ts). */
+async function copyOf(original: string) {
+  const { articleId } = await upsertMaterial({
+    sourceId: REPRINTER, url: `https://example.org/reprint-${T}-${randomUUID()}`, title: "Reprint", bodyText: "A new model.", bodyStatus: "ok", via: "fetch", publishedAt: new Date(),
+  });
+  await sql`INSERT INTO analyses (article_id, input_revision, origin, relevance, category, title_zh, summary_zh, score, selected, output)
+            SELECT ${articleId}, 1, 'rule', relevance, category, title_zh, summary_zh, score, false,
+                   jsonb_build_object('copyOf', ${original}::text, 'distance', 0, 'scope', output->'scope', 'fact', output->'fact')
+            FROM analyses WHERE article_id = ${original} ORDER BY id DESC LIMIT 1`;
+  await publishArticle(articleId);
+  return articleId;
+}
+
+test("a copy joins its original's fact and heat without a judgement, and follows the original when it moves", async () => {
+  hold = gate(); hold.open();
+  const { fact, story } = await newFact();
+  const original = await member(fact, "primary");
+  const copy = await copyOf(original);
+  const hits = [provider.hits(), embeddings.hits()];
+  assert.deepEqual(await groupArticle(copy), { verdict: "copy", factId: fact, storyId: story });
+  assert.deepEqual(await groupArticle(copy), { verdict: "copy", factId: fact, storyId: story });
+  assert.deepEqual([provider.hits(), embeddings.hits()], hits, "neither recall nor a judgement is paid for");
+
+  const memberships = await sql<{ fact_id: number; role: string }[]>`SELECT fact_id, role FROM fact_articles WHERE article_id = ${copy}`;
+  assert.deepEqual(memberships.map((m) => [Number(m.fact_id), m.role]), [[fact, "report"]], "one report membership, however often it is grouped");
+  const signals = await sql<{ story_id: number; source_id: string }[]>`SELECT story_id, source_id FROM story_signals WHERE article_id = ${copy}`;
+  assert.deepEqual(signals.map((s) => [Number(s.story_id), s.source_id]), [[story, REPRINTER]], "the reprinting source counts for heat");
+  const [state] = await sql`SELECT grouping_status, selection_adds_value FROM articles WHERE id = ${copy}`;
+  assert.deepEqual({ ...state }, { grouping_status: "complete", selection_adds_value: false });
+  const [p] = await sql<{ fact_id: number; story_id: number; eligible: boolean }[]>`SELECT fact_id, story_id, eligible FROM publications WHERE article_id = ${copy}`;
+  assert.deepEqual([Number(p!.fact_id), Number(p!.story_id), p!.eligible], [fact, story, false], "evidence for its fact, never listed itself");
+
+  const moved = await newFact();
+  await sql`UPDATE fact_articles SET fact_id = ${moved.fact} WHERE article_id = ${original}`;
+  assert.deepEqual(await groupArticle(copy), { verdict: "copy", factId: moved.fact, storyId: moved.story });
+  assert.equal((await sql`SELECT 1 FROM fact_articles WHERE article_id = ${copy} AND fact_id = ${fact}`).length, 0);
+  assert.equal((await sql`SELECT 1 FROM story_signals WHERE article_id = ${copy} AND story_id = ${story}`).length, 0);
+});
+
+test("a copy of a standalone original stays alone, and a copy of a composite only mentions what it mentions", async () => {
+  hold = gate(); hold.open();
+  const alone = await copyOf(await report(randomText(), randomText()));
+  assert.deepEqual(await groupArticle(alone), { verdict: "copy" });
+  assert.equal((await sql`SELECT 1 FROM fact_articles WHERE article_id = ${alone}`).length, 0);
+  assert.equal((await sql`SELECT 1 FROM story_signals WHERE article_id = ${alone}`).length, 0);
+
+  const one = await newFact();
+  const two = await newFact();
+  const composite = await report(randomText(), randomText());
+  await setScope(composite, "composite");
+  await sql`INSERT INTO fact_articles (fact_id, article_id, role) VALUES (${one.fact}, ${composite}, 'mention'), (${two.fact}, ${composite}, 'mention')`;
+  const copy = await copyOf(composite);
+  assert.deepEqual(await groupArticle(copy), { verdict: "copy" });
+  const memberships = await sql<{ fact_id: number; role: string }[]>`SELECT fact_id, role FROM fact_articles WHERE article_id = ${copy} ORDER BY fact_id`;
+  assert.deepEqual(memberships.map((m) => [Number(m.fact_id), m.role]), [[one.fact, "mention"], [two.fact, "mention"]]);
+  assert.equal((await sql`SELECT 1 FROM story_signals WHERE article_id = ${copy}`).length, 0);
+});
+
+test("an editor's decision about a copy wins over its original's place", async () => {
+  hold = gate(); hold.open();
+  const { fact } = await newFact();
+  const copy = await copyOf(await member(fact, "primary"));
+  await sql`INSERT INTO grouping_overrides (article_id, reason, actor) VALUES (${copy}, 'not a copy', 'test')`;
+  assert.equal((await groupArticle(copy)).verdict, "manual");
+  assert.equal((await sql`SELECT 1 FROM fact_articles WHERE article_id = ${copy}`).length, 0);
 });

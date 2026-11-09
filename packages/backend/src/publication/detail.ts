@@ -9,7 +9,7 @@ import { proxyBodyImages } from "../media/imgproxy.ts";
 import { textToHtml } from "../content/sanitize.ts";
 import { xArticleBody } from "../content/posts.ts";
 import { eventPageCondition, exportTranslation, isChineseBody, ITEM_COLUMNS, ITEM_FROM, seatHolders, showsPost, thinPageCondition, toItemSummary, xView, type ItemRow } from "./items.ts";
-import { evidenceCondition, listedCondition } from "./scope.ts";
+import { coverageCondition } from "./scope.ts";
 import { itemUrl, siteUrl } from "./links.ts";
 import { hasItemPage, publicSourceName } from "./rules.ts";
 import { tagTopics, topicLinks, topicMembership } from "./topics.ts";
@@ -171,7 +171,7 @@ export async function loadItemDetail(id: string, language: "zh" | "original" = "
     const [g] = await sql<{ public_id: string; reports: number; sources: number }[]>`
       SELECT f.public_id, count(p.article_id) AS reports, count(DISTINCT p.source_id) AS sources
       FROM facts f JOIN fact_articles fa ON fa.fact_id = f.id JOIN publications p ON p.article_id = fa.article_id
-      WHERE f.id = ${row.fact_id} AND ${evidenceCondition()} AND ${listedCondition(now)}
+      WHERE f.id = ${row.fact_id} AND ${coverageCondition(now)}
       GROUP BY f.public_id`;
     if (g) {
       group = {

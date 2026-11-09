@@ -72,7 +72,7 @@ function toInput(r: SelectionGoldRow): AnalyzeInputArticle {
     excerpt: null,
     xPost: isX ? { authorName: m.sourceName, handle: "", text: body ?? m.title } : null,
     media: [],
-    source: { name: m.sourceName, kind: r.sourceFacts.sourceKind, tier: r.sourceFacts.sourceTier ?? "T2", firstParty: r.sourceFacts.firstParty ?? false },
+    source: { id: "gold", name: m.sourceName, kind: r.sourceFacts.sourceKind, tier: r.sourceFacts.sourceTier ?? "T2", firstParty: r.sourceFacts.firstParty ?? false },
   };
 }
 

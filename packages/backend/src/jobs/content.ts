@@ -1,4 +1,5 @@
-// Content processing: body extraction when the source needs it → analysis → publish → event grouping.
+// Content processing: body extraction when the source needs it → analysis (or, for a reprint, the
+// original's judgement: editorial/copies.ts) → publish → event grouping.
 // Every article reaches the queues through queueProcessing, which records when it was queued. A failed
 // step records when to try again, and the sweep (content.sweep) is the timer that queues it then; it
 // also queues articles whose job was never created or has waited half an hour. A provider outage makes
@@ -8,6 +9,7 @@ import type { PgBoss } from "pg-boss";
 import { sql, type Db } from "../db.ts";
 import { extractArticleBody, pageFetchable } from "../content/extract.ts";
 import { analyzeArticle } from "../editorial/analyze.ts";
+import { judgeAsCopy } from "../editorial/copies.ts";
 import { isHistorical } from "../content/materials.ts";
 import { publishArticle } from "../publication/publish.ts";
 import { BudgetExceededError, failedReceiptId, failureKind } from "../providers/receipts.ts";
@@ -22,6 +24,8 @@ const MAX_OUTPUT_FAILURES = 3;
 const MAX_EXTRACT_FAILURES = 3;
 /** An article queued this long ago is queued again, in case its job was lost. */
 const QUEUED_STALE = "30 minutes";
+/** A copy of an article whose grouping is still pending looks again this much later. */
+const ORIGINAL_WAIT_MINUTES = 5;
 
 type Step = "extract" | "analyze";
 
@@ -144,19 +148,34 @@ async function processRevision(articleId: string, row: NonNullable<Awaited<Retur
     return { state: "skipped" };
   }
   try {
-    const result = await analyzeArticle(articleId, { attemptTag: opts.attemptTag });
-    if (!result) return { state: "missing" };
-    // Only a title or a feed summary: the article page first; extraction queues the analysis again.
-    if (result.needsBody || !result.output) {
-      await queueProcessing(articleId, { step: "extract" });
-      return { state: "fetching-body" };
+    // A reprint of an article another source already had judged takes that judgement, without a model
+    // call; an explicit re-evaluation is judged in full.
+    const copy = opts.attemptTag ? null : await judgeAsCopy(articleId);
+    if (copy?.waiting) {
+      await sql`UPDATE articles SET processing_state = 'new', processing_retry_at = now() + make_interval(mins => ${ORIGINAL_WAIT_MINUTES}), processing_queued_at = NULL
+                WHERE id = ${articleId} AND revision = ${row.revision}`;
+      return { state: "waiting-original" };
     }
-    if (result.stale) return { state: "stale" }; // the newer revision has its own job
+    let relevance: string;
+    if (copy) {
+      if (copy.stale) return { state: "stale" };
+      relevance = copy.relevance;
+    } else {
+      const result = await analyzeArticle(articleId, { attemptTag: opts.attemptTag });
+      if (!result) return { state: "missing" };
+      // Only a title or a feed summary: the article page first; extraction queues the analysis again.
+      if (result.needsBody || !result.output) {
+        await queueProcessing(articleId, { step: "extract" });
+        return { state: "fetching-body" };
+      }
+      if (result.stale) return { state: "stale" }; // the newer revision has its own job
+      relevance = result.output.relevance;
+    }
     await publishArticle(articleId);
-    if (needsGrouping({ participationMode: row.participation_mode, historical: row.historical, relevance: result.output.relevance })) await enqueue(QUEUES.group, { articleId }, { singletonKey: articleId, priority: groupingPriority({ signal: false, historical: row.historical }) });
+    if (needsGrouping({ participationMode: row.participation_mode, historical: row.historical, relevance })) await enqueue(QUEUES.group, { articleId }, { singletonKey: articleId, priority: groupingPriority({ signal: false, historical: row.historical }) });
     await sql`UPDATE articles SET processing_attempts = 0, processing_retry_at = NULL, processing_queued_at = NULL
               WHERE id = ${articleId} AND revision = ${row.revision}`;
-    return { state: result.output.relevance };
+    return { state: relevance };
   } catch (error) {
     if (shutdownSignal.signal.aborted) throw error;
     if (failureKind(error) === "unknown") {

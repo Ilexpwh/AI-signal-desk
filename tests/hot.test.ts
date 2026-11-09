@@ -23,16 +23,17 @@ async function source(key: string, opts: { mode?: string; owner?: string; create
 }
 
 let n = 0;
-async function signal(story: number, sourceId: string, hoursBefore: number, opts: { author?: string; kind?: string; withdrawn?: boolean; role?: string | null; composite?: boolean; standalone?: boolean } = {}) {
+async function signal(story: number, sourceId: string, hoursBefore: number, opts: { author?: string; kind?: string; withdrawn?: boolean; role?: string | null; composite?: boolean; standalone?: boolean; copyOf?: string } = {}) {
   n += 1;
   const id = `${T}-a${n}`;
   const at = new Date(AT.getTime() - hoursBefore * H);
   await sql`INSERT INTO articles (id, source_id, identity_key, url, title, author, discovered_at, timeline_at)
             VALUES (${id}, ${sourceId}, ${id}, ${`https://example.org/${id}`}, ${id}, ${opts.author ?? null}, ${at}, ${at})`;
   const [analysis] = await sql`INSERT INTO analyses (article_id,input_revision,origin,output)
-    VALUES (${id},1,'rule',${sql.json({scope:opts.composite ? 'composite' : 'single'})}) RETURNING id`;
+    VALUES (${id},1,'rule',${sql.json({scope:opts.composite ? 'composite' : 'single', ...(opts.copyOf ? {copyOf:opts.copyOf} : {})})}) RETURNING id`;
+  // A copy is never listed itself (eligible false), but it is evidence for its fact.
   await sql`INSERT INTO publications (article_id, analysis_id, revision, visibility, eligible, selected, title, source_id, channel, first_party, url, discovered_at, timeline_at, body_mode, sort_at)
-    VALUES (${id}, ${analysis!.id}, 1, ${opts.withdrawn ? 'withdrawn' : 'public'}, true, false, ${id}, ${sourceId}, 'news', false, ${`https://example.org/${id}`}, ${at}, ${at}, 'summary', ${at})`;
+    VALUES (${id}, ${analysis!.id}, 1, ${opts.withdrawn ? 'withdrawn' : 'public'}, ${!opts.copyOf}, false, ${id}, ${sourceId}, 'news', false, ${`https://example.org/${id}`}, ${at}, ${at}, 'summary', ${at})`;
   if (opts.role !== null) {
     const [f] = await sql`INSERT INTO facts (public_id,story_id,title) VALUES (${id},${story},${id}) RETURNING id`;
     await sql`INSERT INTO fact_articles (fact_id,article_id,role) VALUES (${f!.id},${id},${opts.role ?? 'report'})`;
@@ -78,6 +79,13 @@ test("withdrawn reports and changed roles are counted as they stand now", async 
   assert.equal(Number(r?.participants), 2, "a and c; the withdrawn report and the isolated source are out");
   assert.equal(Number(r?.editorial_participants), 1);
   assert.equal(Number(r?.signal_participants), 1);
+});
+
+test("a source that reprints a report is a participant of its story, though the copy is not listed", async () => {
+  const s = await story();
+  const original = await signal(s, await source("original"), 1);
+  await signal(s, await source("reprint"), 1, { copyOf: original });
+  assert.equal(Number((await rowOf(s))?.participants), 2);
 });
 
 test("one company's channels are one participant; every community author is one", async () => {

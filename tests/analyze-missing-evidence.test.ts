@@ -26,7 +26,7 @@ const article = (changes: Partial<AnalyzeInputArticle> = {}): AnalyzeInputArticl
   id: `missing-${tag()}`, revision: 1, title: "模型发布", url: "https://example.org/news", author: null,
   publishedAt: new Date("2026-10-02T00:00:00Z"), bodyStatus: "unconfirmed", bodyText: null,
   excerpt: null, media: [], xPost: null,
-  source: { name: "Fixture", kind: "rss", tier: "T1", firstParty: true }, ...changes,
+  source: { id: "fixture", name: "Fixture", kind: "rss", tier: "T1", firstParty: true }, ...changes,
 });
 const runFresh = (input: AnalyzeInputArticle) => runAnalysis(input, { attemptTag: tag() });
 

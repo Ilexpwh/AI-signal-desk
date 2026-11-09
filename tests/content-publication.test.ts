@@ -18,6 +18,9 @@ import { overrideFields, setVisibility } from "@aihot/backend/admin/content";
 import { stopBoss } from "@aihot/backend/jobs/queue";
 import { latestHotRanking } from "@aihot/backend/publication/hot";
 import { storyTexts } from "@aihot/backend/publication/story-text";
+import { factSources } from "@aihot/backend/publication/coverage";
+import { loadPool } from "@aihot/backend/publication/pool";
+import { digestReports } from "@aihot/backend/publication/story-evidence";
 
 const key = `evidence-${tag()}`;
 const now = new Date();
@@ -147,6 +150,36 @@ test("item detail counts the same fact evidence as its expanded group", async ()
   assert.equal(expanded.reports.length, 2);
   assert.equal(detail.item.group!.reportCount, expanded.reports.length);
   assert.equal(detail.item.group!.additionalSourceCount, 1);
+});
+
+// A copy (editorial/copies.ts) is never listed itself, but its source did report the fact.
+test("a copy counts toward its fact's coverage everywhere it is counted, and is listed nowhere", async () => {
+  const s = await source("copy-original", "T1");
+  const other = await source("copy-reprint", "T2");
+  const g = await story();
+  const main = await report(s, g, { title: "原文报道", hours: 3 });
+  const copy = await report(other, g, { title: "转载报道", hours: 2, selected: false });
+  const own = `${key}-copy`;
+  await sql`UPDATE publications SET tags = ${[own]}, eligible = (article_id <> ${copy}) WHERE article_id IN ${sql([main, copy])}`;
+  await sql`UPDATE analyses SET output = output || jsonb_build_object('copyOf', ${main}::text) WHERE article_id = ${copy}`;
+
+  const detail = await loadItemDetail(main, "zh", now);
+  assert.ok(detail.kind === "found");
+  assert.deepEqual([detail.item.group!.reportCount, detail.item.group!.additionalSourceCount], [2, 1]);
+  const expanded = (await loadGroupReports({ factPublicId: g.factPublicId, channel: "all", category: null, tag: own }, now))!;
+  assert.deepEqual(expanded.reports.map((r) => r.id).sort(), [main, copy].sort());
+  const card = (await loadTimeline({ channel: "all", category: null, tag: own, now })).cards.find((c) => c.key === `f${g.factId}`)!;
+  assert.deepEqual([card.item.id, card.group!.reportCount, card.group!.additionalSourceCount], [main, 2, 1]);
+  assert.deepEqual((await factSources([g.factId], now)).get(g.factId)?.sort(), [other, s].sort());
+
+  assert.deepEqual((await loadPool({ channel: "all", category: null, tag: own, now })).items.map((i) => i.id), [main]);
+  assert.deepEqual((await digestReports(sql, [g.storyId], now)).map((r) => r.id), [main], "the original's words stand for it");
+
+  await sql`UPDATE publications SET visibility = 'withdrawn' WHERE article_id = ${copy}`;
+  assert.deepEqual((await factSources([g.factId], now)).get(g.factId), [s], "a withdrawn copy stops counting");
+  const after = await loadItemDetail(main, "zh", now);
+  assert.ok(after.kind === "found");
+  assert.equal(after.item.group!.reportCount, 1);
 });
 
 // A newer archive report may remain readable without qualifying as news. It cannot become the

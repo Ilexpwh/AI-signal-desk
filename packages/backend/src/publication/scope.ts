@@ -69,12 +69,28 @@ export function latestCompositeCondition(article: ReturnType<typeof sql>) {
 }
 
 /**
- * Evidence for a later identity decision: not a composite and not explicitly withdrawn.
+ * The report was published from a copy's analysis (editorial/copies.ts): it repeats an original that
+ * holds the fact's place in lists, and is counted only as coverage.
+ */
+export function copyCondition() {
+  return sql`EXISTS (SELECT 1 FROM analyses copy_an WHERE copy_an.id = p.analysis_id AND copy_an.output->>'copyOf' IS NOT NULL)`;
+}
+
+/** The same rule over the latest analysis of report `article`, for grouping, as latestCompositeCondition. */
+export function latestCopyCondition(article: ReturnType<typeof sql>) {
+  return sql`(SELECT copy_analysis.output->>'copyOf' IS NOT NULL FROM analyses copy_analysis
+    WHERE copy_analysis.article_id = ${article}
+    ORDER BY copy_analysis.input_revision DESC, copy_analysis.id DESC LIMIT 1) IS TRUE`;
+}
+
+/**
+ * Evidence for a later identity decision: not a composite, not a copy (its original stands for it, so
+ * it is neither recalled nor embedded) and not explicitly withdrawn.
  * A summary-only report or one awaiting publication keeps its existing eligibility.
  * Historical memberships and judgements are retained independently of this predicate.
  */
 export function groupingEvidenceCondition(article: ReturnType<typeof sql>) {
-  return sql`NOT ${latestCompositeCondition(article)} AND NOT EXISTS (
+  return sql`NOT ${latestCompositeCondition(article)} AND NOT ${latestCopyCondition(article)} AND NOT EXISTS (
     SELECT 1 FROM publications grouping_publication
     WHERE grouping_publication.article_id = ${article} AND grouping_publication.visibility = 'withdrawn')`;
 }
@@ -82,6 +98,14 @@ export function groupingEvidenceCondition(article: ReturnType<typeof sql>) {
 /** `fa` links report `p` to a fact as evidence: a primary or report membership, never a composite. */
 export function evidenceCondition() {
   return sql`fa.role <> 'mention' AND NOT ${compositeCondition()}`;
+}
+
+/**
+ * Report `p` counts toward how widely its fact was reported at `now` ("另外 N 家也报道了", the daily's
+ * source count): evidence that is listed, or a public copy, which lists no card of its own.
+ */
+export function coverageCondition(now: Date) {
+  return sql`${evidenceCondition()} AND (${listedCondition(now)} OR (p.visibility = 'public' AND ${copyCondition()}))`;
 }
 
 /**

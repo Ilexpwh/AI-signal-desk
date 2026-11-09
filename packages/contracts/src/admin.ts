@@ -247,6 +247,8 @@ export interface AdminContentChain {
     published_at: Timestamp | null; published_at_claim: string | null; discovered_at: Timestamp; timeline_at: Timestamp; backfill: boolean;
     body_status: string; revision: number; processing_state: string; processing_error: string | null; grouped_at: Timestamp | null; body_chars: number | null;
     source_name: string; source_kind: string; tier: string; participation_mode: string; site_fulltext: boolean; syndicate_fulltext: boolean;
+    /** The original whose judgement its latest analysis took (a reprint), and how many fingerprint bits they differ in. */
+    copy_of: string | null; copy_distance: number | null;
   };
   discoveries: Array<{ source_id: string; via: string; discovered_at: Timestamp }>;
   revisions: Array<{ revision: number; title: string; content_hash: string | null; created_at: Timestamp }>;
@@ -262,6 +264,8 @@ export interface AdminContentChain {
   decisions: Array<{ verdict: string; fact_id: number | null; story_id: number | null; receipt_id: number | null; candidates: unknown; created_at: Timestamp }>;
   deliveries: Array<{ target_key: string; dedupe_key: string; status: string; attempts: number; response: string | null; created_at: Timestamp; sent_at: Timestamp | null }>;
   history: AdminAuditEntry[];
+  /** The reprints that took this item's judgement, first discovered first. */
+  copies: Array<{ id: string; title: string; source_name: string; distance: number; discovered_at: Timestamp }>;
 }
 
 // Feedback
