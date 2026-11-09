@@ -1,8 +1,10 @@
 // Checks the selection against your own labelled samples (a "gold set"): each case runs the site's
 // selection steps (editorial/analyze.ts) — the prefilter, then the score prompt twice with every model in
 // --models (each call's content type and axes weighed by industry/selection.ts, and shown as the case's reason),
-// the two scores deciding against the case's tier threshold (gold cases carry no source class) — and is compared with your
-// decision. A threshold sweep shows what another threshold would have done. The gold file has one case
+// the scores deciding against the case's tier threshold (gold cases carry no source class) — and is compared with your
+// decision. Both scores are always asked; each decision replays production, which skips the second score
+// when the first lies far from every line (secondScoreRate, and flipsVsBoth against deciding on both).
+// A threshold sweep shows what another threshold would have done. The gold file has one case
 // per line as eval-selection-core.ts describes; lines starting with // are skipped.
 // Usage: node --env-file=.env scripts/eval-selection.ts [--gold .data/gold.jsonl] [--models default,deepseek-flash] [--n 200] [--split all] [--label "..."]
 // Receipts make re-runs free; "either" cases are excluded from decisive metrics. Each run is also
@@ -17,6 +19,7 @@ import {
   SELECTION_PROMPT_VERSION,
   awaitsMaterial,
   buildScoreInput,
+  decidingScores,
   runSelectionPrefilter,
   runSelectionScores,
   scoresSelect,
@@ -86,9 +89,13 @@ interface Outcome {
   error: string | null;
 }
 
-/** The site's decision for the case, at its tier threshold or at `threshold`; null when the case failed. */
-const decide = (x: Outcome, threshold?: number): SelectionDecision | null =>
-  x.error !== null ? null : x.relevance === "pass" && scoresSelect(x.scores, threshold) ? "select" : "reject";
+/**
+ * The site's decision for the case at its tier threshold, with the scores production would have asked
+ * there (decidingScores; `both` decides with every score instead); null when the case failed.
+ */
+const decide = (x: Outcome, both = false): SelectionDecision | null =>
+  x.error !== null ? null : x.relevance === "pass" && scoresSelect(both ? x.scores : deciding(x.scores)) ? "select" : "reject";
+const deciding = (scores: AnalysisRun["scores"]) => (scores ? decidingScores(scores, scores.threshold) : null);
 
 /** Why a case scored as it did: each call's content type and axes, shown beside the case in SelectBench. */
 const axesReason = (scores: AnalysisRun["scores"]): string | null =>
@@ -121,7 +128,8 @@ for (const model of models) {
       let request = scoreRequests.get(key);
       if (!request) {
         const sharedReceiptIds: number[] = [];
-        request = runSelectionScores(input, { scoreModel: model }, (id) => sharedReceiptIds.push(id)).then(
+        // Every score call, whatever the first says: a shared result serves cases at other thresholds, and the sweep.
+        request = runSelectionScores(input, { scoreModel: model, allScores: true }, (id) => sharedReceiptIds.push(id)).then(
           (scores) => ({ scores, receiptIds: sharedReceiptIds, error: null }),
           (error: unknown) => ({ scores: null, receiptIds: sharedReceiptIds, error: String(error).slice(0, 200) }),
         );
@@ -142,13 +150,17 @@ for (const model of models) {
     const pred = decide(x);
     const gold = x.r.gold.decision;
     if (pred === null || gold === "either") continue;
-    if (pred === "select" && gold === "reject") mistakes.push({ kind: "FP", title: x.r.material.title, score: shownScore(x.scores), stratum: x.r.samplingContext?.samplingStratum ?? null });
-    else if (pred === "reject" && gold === "select") mistakes.push({ kind: "FN", title: x.r.material.title, score: shownScore(x.scores), relevance: x.relevance, stratum: x.r.samplingContext?.samplingStratum ?? null });
+    if (pred === "select" && gold === "reject") mistakes.push({ kind: "FP", title: x.r.material.title, score: shownScore(deciding(x.scores)), stratum: x.r.samplingContext?.samplingStratum ?? null });
+    else if (pred === "reject" && gold === "select") mistakes.push({ kind: "FN", title: x.r.material.title, score: shownScore(deciding(x.scores)), relevance: x.relevance, stratum: x.r.samplingContext?.samplingStratum ?? null });
   }
   const usage = await usageFor(results.flatMap((x) => x.receiptIds));
+  // How often production would ask the second score, and how often deciding on the first alone changes a decision.
+  const scored = results.filter((x) => x.error === null && x.scores && !x.scores.refused && x.scores.values.length > 1);
   const summary = {
     model,
     ...metrics,
+    secondScoreRate: scored.length ? Math.round((scored.filter((x) => deciding(x.scores)!.values.length > 1).length / scored.length) * 1000) / 1000 : null,
+    flipsVsBoth: scored.filter((x) => decide(x) !== decide(x, true)).length,
     ...usage,
     wallSeconds: Math.round((performance.now() - started) / 1000),
   };
@@ -168,7 +180,7 @@ for (const model of models) {
     stratum: x.r.samplingContext?.samplingStratum ?? null,
     gold: x.r.gold.decision,
     decision: decide(x),
-    score: shownScore(x.scores),
+    score: shownScore(deciding(x.scores)),
     relevance: x.relevance,
     reason: axesReason(x.scores),
     receiptId: x.receiptIds[0] ?? null,

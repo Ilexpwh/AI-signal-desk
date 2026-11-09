@@ -5,8 +5,9 @@ import { describePublicationTime } from "../sources/dates.ts";
 // revision before any step.
 //   1. prefilter: does the material belong to this industry at all (wide recall). Only BLOCK stops an
 //      item; a BLOCK on an original post without text counts as UNKNOWN;
-//   2. score: two independent scores against the source's threshold (tier and class, industry/selection.ts) decide 精选;
+//   2. score: independent scores against the source's threshold (tier and class, industry/selection.ts) decide 精选;
 //      each call returns the content type and five axes, weighed here by the type's row in industry/selection.ts;
+//      a second score is asked only when the first lies near a line it decides (secondScoreWithin);
 //   3. structure: category, tags, subjects and the current news fact, beside scoring;
 //   4. writing, once the structure is in: the Chinese title, summary and reason by the content
 //      understanding for selected and near-selected items, by the cheaper title/summary prompts for the rest;
@@ -51,12 +52,12 @@ export const ANALYZE_PROMPT_VERSION = Object.values(PROMPT_VERSIONS).join("+");
 
 // Scoring
 
-/** Independent score calls per article; their sum decides, their mean (floored) is shown. */
+/** The most independent score calls per article; their mean decides, and is shown floored. */
 export const SCORE_CALLS = 2;
 
 /**
  * The threshold on the mean score for a source (industry/selection.ts): its tier's, raised to its
- * class's floor; a class never lowers it. Selected when score1 + score2 >= 2 × threshold. Tiers
+ * class's floor; a class never lowers it. Selected when the mean of the scores reaches it. Tiers
  * without a threshold are not scored for 精选.
  */
 export function selectionThreshold(source: { tier: string; selectionClass?: string | null }): number | null {
@@ -67,6 +68,14 @@ export function selectionThreshold(source: { tier: string; selectionClass?: stri
 
 /** Unselected items above this mean are written like selected ones. */
 export const UNDERSTAND_FLOOR = SELECTION.understandFloor;
+
+/**
+ * A second score is asked only when the first lies within `secondScoreWithin` of a line a score decides:
+ * the source's threshold (精选), the understand floor (how it is written) or the browse floor (全部动态).
+ */
+export function needsSecondScore(first: number, threshold: number): boolean {
+  return [threshold, UNDERSTAND_FLOOR, SELECTION.browseFloor].some((line) => Math.abs(first - line) < SELECTION.secondScoreWithin);
+}
 
 /** Call parameters of the score step, unless the model sets its own (the site's preset, `scoreCall`). */
 const scoreCall = (model: string) => MODELS[model]?.scoreCall ?? { temperature: 0.2, maxTokens: 1024, timeoutMs: 120_000 };
@@ -247,7 +256,8 @@ export function waitsForPage(a: AnalyzeInputArticle): boolean {
   return a.bodyStatus === "pending" && !a.bodyText && !a.xPost && pageFetchable(a.url, a.source.kind);
 }
 
-type StepOpts = { attemptTag?: string; scoreModel?: string };
+/** `allScores`: an evaluation asks every score call, and replays the production rule with decidingScores. */
+type StepOpts = { attemptTag?: string; scoreModel?: string; allScores?: boolean };
 type ReceiptObserver = (receiptId: number) => void;
 
 /** A stopping worker finishes the stage it is in, never starts the next. */
@@ -306,8 +316,9 @@ async function runScores(
   const axes: ScoreAxes[] = [];
   const receiptIds: number[] = [];
   let reused = true;
-  // One after the other: the second call reuses the provider's cached prompt.
+  // One after the other: the second call reuses the provider's cached prompt, and is not asked when the first decides alone.
   for (let i = 0; i < SCORE_CALLS; i++) {
+    if (i > 0 && !opts.allScores && !needsSecondScore(values[0]!, threshold)) break;
     checkAnalysisRunning();
     try {
       const res = await chatJson({
@@ -483,24 +494,33 @@ export function awaitsMaterial(a: AnalyzeInputArticle): boolean {
   return missingEvidence(a) && !originalPostCopy(a.xPost, a.url);
 }
 
-/** The two scores' sum; null when the scoring was refused or is incomplete. */
-function scoreSum(scores: AnalysisRun["scores"]): number | null {
-  return scores && !scores.refused && scores.values.length === SCORE_CALLS ? scores.values.reduce((total, v) => total + v, 0) : null;
+/** The scores' mean; null when the scoring was refused or gave no score. */
+function scoreMean(scores: AnalysisRun["scores"]): number | null {
+  return scores && !scores.refused && scores.values.length ? scores.values.reduce((total, v) => total + v, 0) / scores.values.length : null;
 }
 
-/** The score shown: the two scores' mean, floored (it never decides a half point on its own). */
+/** The score shown: the scores' mean, floored (it never decides a half point on its own). */
 export function shownScore(scores: AnalysisRun["scores"]): number | null {
-  const sum = scoreSum(scores);
-  return sum === null ? null : Math.floor(sum / SCORE_CALLS);
+  const mean = scoreMean(scores);
+  return mean === null ? null : Math.floor(mean);
 }
 
 /**
- * The selection rule on the scores: they add up to twice the source's threshold (or `threshold`,
- * when an evaluation sweeps it). The item must also pass relevance (normalizeAnalysis).
+ * The selection rule on the scores: their mean reaches the source's threshold (or `threshold`, when
+ * an evaluation sweeps it). The item must also pass relevance (normalizeAnalysis).
  */
 export function scoresSelect(scores: AnalysisRun["scores"], threshold = scores?.threshold ?? null): boolean {
-  const sum = scoreSum(scores);
-  return sum !== null && threshold !== null && sum >= threshold * SCORE_CALLS;
+  const mean = scoreMean(scores);
+  return mean !== null && threshold !== null && mean >= threshold;
+}
+
+/**
+ * The scores production would have decided with at `threshold`, from scores an evaluation asked in
+ * full: only the first, when it lies far from every line a score decides.
+ */
+export function decidingScores(scores: AnalysisRun["scores"], threshold: number): AnalysisRun["scores"] {
+  if (!scores || scores.refused || scores.values.length < 2 || needsSecondScore(scores.values[0]!, threshold)) return scores;
+  return { ...scores, values: scores.values.slice(0, 1), axes: scores.axes.slice(0, 1), receiptIds: scores.receiptIds.slice(0, 1) };
 }
 
 /** Runs the steps on the material as it is (or reuses their receipts) without writing business results. */
@@ -515,8 +535,8 @@ export async function runAnalysis(a: AnalyzeInputArticle, opts: StepOpts = {}): 
   const structure = runStructure(a, opts).then((value) => ({ value }), (error: unknown) => ({ error }));
   try {
     const scores = await runSelectionScores(a, opts);
-    const sum = scoreSum(scores);
-    const near = scoresSelect(scores) || (sum !== null && sum > UNDERSTAND_FLOOR * SCORE_CALLS);
+    const mean = scoreMean(scores);
+    const near = scoresSelect(scores) || (mean !== null && mean > UNDERSTAND_FLOOR);
     const s = await structure;
     if ("error" in s) throw s.error;
     // Writing checks the material itself and is never handed the structure's fact: given those

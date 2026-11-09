@@ -4,7 +4,7 @@
 
 1. **收进来**：同一网址、同一内容只留一份。普通文章只有标题或摘要时，按信源规则补取正文；视频播放页使用已提供的文字材料，不把播放器页面当正文。没有可信发布时间的资料先不公开，读到原文日期后再判断新旧（见 [信源](sources.md#规则旧文不刷屏) 的“旧文不刷屏”）。
 2. **预筛**（`prefilter.md`）：这是不是本行业的事。宽进，只拦明显无关的：`BLOCK` 的资料不出现在任何公开页面；`PASS` 和拿不准的 `UNKNOWN` 继续往下走。只有标题、没有正文、订阅摘要或帖子文字的普通文章先等待材料，不评分、不凭标题写文案，也不进入公开池；材料补齐产生新修订后再判断。可展示的空文字或纯链接原帖沿用原有评分与原样展示规则。
-3. **评分**（`selection-score.md`）：同一份评分标准独立打两次分。每次模型只判内容类型、给五个维度各打 0–10 分，并标出材料是否残缺到无法判断（`thin`）；系统按 `industry/selection.ts` 里这个类型的权重把五个维度合成 0–100 分，`thin` 的不高于 `thinCap`。**两次之和 ≥ 2 × 门槛**就够分，门槛按信源分级不同，信源类别还能把某些官方信源的门槛抬高；够分的还要过第 6 步的去重才进精选。页面上显示的分数是两次的平均（向下取整）。
+3. **评分**（`selection-score.md`）：同一份评分标准独立打两次分。每次模型只判内容类型、给五个维度各打 0–10 分，并标出材料是否残缺到无法判断（`thin`）；系统按 `industry/selection.ts` 里这个类型的权重把五个维度合成 0–100 分，`thin` 的不高于 `thinCap`。**两次的平均 ≥ 门槛**就够分，门槛按信源分级不同，信源类别还能把某些官方信源的门槛抬高；够分的还要过第 6 步的去重才进精选。页面上显示的分数是两次的平均（向下取整）。第一次的分数离门槛、`understandFloor`、`browseFloor` 都足够远（`secondScoreWithin`）时，第二次不评，直接按第一次判断；默认 `101` 总是评两次，要改先按下文“少评一次分”校准。
 4. **结构化**（`structure.md`）：和评分同时进行。给出分类和标签（页面上显示的就是这一份）、主体公司，判断这篇是一条具体新闻、讲多件事的综合稿，还是材料不够、说不清；是具体新闻的，抽出它的事实（谁、做了什么、对什么、什么时候）和原文里的出处、前提条件。主题页、事件归组和日报都靠它。
 5. **写标题摘要**：等结构化完成再写。入选的和差一点入选的（平均分高于 `understandFloor`），按 `content-understanding.md` 写中文标题、答案先行的摘要和推荐理由；其余的按 `summarize-*.md` 写简短的标题摘要，进“全部动态”。浏览“全部动态”（网页列表，接口、给 Agent 的最新列表和 MCP 的全部模式，“全部动态”RSS）只出平均分不低于 `browseFloor` 的资料，没评上分的照常出；带搜索词时仍搜全部。X 帖子没有正文或只含链接时，保留原帖的链接、图片和引用，不调用写作或翻译模型，也不生成“请补充正文”的文案；已经取得实际正文的 X 长文照常处理。写好的文字用了 `industry/wording.ts` 里列出的词时，再让模型只改这些词一次（`mend-wording.md`）。
 6. **归组与去重**（`group-*.md`）：不同来源报道的同一件事归成一个事件，事件页有综述（`story-digest.md`），“热门”按事件排。修改综述提示词前，可用 [综述评测](story-digest-evaluation.md) 在同一批事件上把现有提示词和候选提示词并排比较。分数够了的资料要等归组完成才进精选：模型同时判断它和精选里已有的报道是不是同一条新闻，以及它有没有精选还没给过的具体信息。
@@ -29,6 +29,7 @@ export const SELECTION = {
     // …其余六类
   },
   thinCap: 30,                                // 材料残缺到无法判断（thin）的，分数不高于它
+  secondScoreWithin: 101,                     // 第一次评分离各条线都不近于它时不评第二次；101 总是评两次
   thresholds: { T1: 60, T1_5: 65, T2: 76 },   // 两次评分的平均至少要到这个数
   classes: {                                  // 信源类别：这类信源的门槛不低于这里的数
     ecosystem: { label: "生态与基础设施", threshold: 70 },
@@ -82,7 +83,7 @@ export const SELECTION = {
 node --env-file=.env scripts/eval-selection.ts --gold .data/gold.jsonl --split development --label "第一版评分标准"
 ```
 
-对每条样本跑一遍预筛和两次评分，输出：
+对每条样本跑一遍预筛和两次评分（评测总是评两次，再按线上的 `secondScoreWithin` 重放：第一次离各条线都远的，只按第一次判断），输出：
 
 - **有效输出准确率、查准率、查全率和 F1**：只看成功得到入选决定的非 `either` 样本，用来判断模型答出来以后有多准；
 - **覆盖率**：成功得到入选决定的样本占全部非 `either` 金标样本的比例；**完整准确率**则用全部非 `either` 金标样本作分母，把模型失败或回答不合格式也算作没有正确完成；
@@ -105,6 +106,44 @@ node --env-file=.env scripts/eval-selection.ts --gold .data/gold.jsonl --split d
 - 整体偏松或偏紧，而判错的条目分数都贴着门槛，再调 `industry/selection.ts` 的门槛。
 
 先改标准，再动门槛：门槛只能整体移动，解决不了“哪一类判错了”。每改一次跑一遍，SelectBench 里能看到每一版的对比。比较模型时不要只看有效输出 F1：如果覆盖率明显不同，还要一起看完整准确率；高分但经常无法完成结构化判断的模型，不应被失败样本从分母里“隐藏”掉。
+
+### 4. 少评一次分：校准 `secondScoreWithin`
+
+第一次评分离门槛很远时，第二次几乎不会改变结论。线上已经评过两次的判断记录就是现成的数据，不用新调用：把两次中的每一次都当成“第一次”，看只按它判断会和两次的平均差多少。
+
+```bash
+psql "$DATABASE_URL" -v floor=50 -v browse=40 -v days=90 -f score-margin.sql   # floor、browse 填你的 understandFloor、browseFloor
+```
+
+```sql
+-- score-margin.sql：每个候选距离下，会少评多少次，以及按第一次判断会改变多少结论
+WITH pairs AS (
+  SELECT DISTINCT ON (an.article_id, an.input_revision)
+         (an.output->'scores'->>0)::int AS s1, (an.output->'scores'->>1)::int AS s2, (an.output->>'threshold')::int AS t, an.relevance
+  FROM analyses an
+  WHERE an.origin = 'model' AND an.created_at > now() - make_interval(days => :days)
+    AND CASE WHEN jsonb_typeof(an.output->'scores') = 'array' THEN jsonb_array_length(an.output->'scores') END = 2
+    AND jsonb_typeof(an.output->'threshold') = 'number'
+    AND an.output ? 'scoreAxes'                                -- 只用五维评分以后的记录
+  ORDER BY an.article_id, an.input_revision, an.id DESC
+), draws AS (SELECT s1 AS a, s2 AS b, t, relevance FROM pairs UNION ALL SELECT s2, s1, t, relevance FROM pairs),
+judged AS (
+  SELECT m, relevance, least(abs(a - t), abs(a - :floor), abs(a - :browse)) >= m AS alone,
+         a >= t AS sel1, (a + b) >= 2 * t AS sel2,
+         (a >= t OR a > :floor) AS near1, ((a + b) >= 2 * t OR (a + b) > 2 * :floor) AS near2,
+         a >= :browse AS list1, floor((a + b) / 2.0) >= :browse AS list2
+  FROM draws CROSS JOIN generate_series(0, 30) AS m
+)
+SELECT m AS margin, count(*) AS draws,
+       round(100.0 * count(*) FILTER (WHERE NOT alone) / count(*), 1) AS second_call_pct,
+       count(*) FILTER (WHERE alone AND relevance = 'pass' AND sel1 AND NOT sel2) AS selected_extra,
+       count(*) FILTER (WHERE alone AND relevance = 'pass' AND sel2 AND NOT sel1) AS selected_lost,
+       count(*) FILTER (WHERE alone AND near1 <> near2) AS writer_flips,
+       count(*) FILTER (WHERE alone AND list1 <> list2) AS browse_flips
+FROM judged GROUP BY m ORDER BY m;
+```
+
+`margin = 0` 一行是“总是只评一次”：单次评分本身和两次平均的分歧。选 `selected_extra + selected_lost` 每千次仍在你能接受的范围内的最小距离，填进 `secondScoreWithin`，再用评测确认：报告里的 `secondScoreRate` 是会评第二次的比例，`flipsVsBoth` 是只按第一次判断时和按两次判断结论不同的样本数。五维评分刚上线时先等一两周，攒够新格式的记录再算。
 
 ## 换模型
 

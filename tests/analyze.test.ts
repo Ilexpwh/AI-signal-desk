@@ -8,7 +8,10 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { closeDb, sql } from "@aihot/backend/db";
 import { upsertMaterial } from "@aihot/backend/content/materials";
-import { analyzeArticle, buildMaterial, loadAnalyzeInput, normalizeStructure, selectionThreshold, StructureSchema, UNDERSTAND_FLOOR, weighedScore, type ScoreAxes } from "@aihot/backend/editorial/analyze";
+import {
+  analyzeArticle, buildMaterial, decidingScores, loadAnalyzeInput, needsSecondScore, normalizeStructure, selectionThreshold, StructureSchema, UNDERSTAND_FLOOR, weighedScore,
+  type ScoreAxes,
+} from "@aihot/backend/editorial/analyze";
 import { createSource, updateSource } from "@aihot/backend/admin/sources";
 import { queueProcessing } from "@aihot/backend/jobs/content";
 import { QUEUES, stopBoss } from "@aihot/backend/jobs/queue";
@@ -24,7 +27,7 @@ const CLASSED_SOURCE = `test-analyze-classed-${T}`;
 
 interface Req { step: AnalysisStep; marker: string; user: string }
 const requests: Req[] = [];
-const MARKERS = ["CLEAR", "RESCUE", "LOW", "OFFTOPIC", "BARE", "VAGUE", "THIN", "SENSITIVE", "推文", "WORDY", "REFUSAL", "RENUMBER", "UNMENDED", "ECOSYS", "GARBLED"];
+const MARKERS = ["CLEAR", "RESCUE", "LOW", "OFFTOPIC", "BARE", "VAGUE", "THIN", "SENSITIVE", "推文", "WORDY", "REFUSAL", "RENUMBER", "UNMENDED", "ECOSYS", "GARBLED", "DECISIVE", "BORDER"];
 // The scores sit a few points around the pack's T1 threshold and understand floor, so each case means
 // the same after a site recalibrates them: selected when the two add up to 2 × T1, written like a
 // selected item when they add up to more than 2 × FLOOR, translated otherwise.
@@ -38,7 +41,7 @@ const GARBLED = scoreAnswer(T1 + 10, { thin: true });
 const scoreAnswers: Record<string, Array<number | ScoreAxes>> = {
   CLEAR: [T1 + 3, T1 - 1], RESCUE: [FLOOR + 1, FLOOR], LOW: [FLOOR, FLOOR - 1], THIN: [T1, T1], SENSITIVE: [T1, T1], 推文: [FLOOR, FLOOR],
   BARE: [FLOOR - 2, FLOOR - 4], VAGUE: [T1, T1 + 2], WORDY: [T1, T1], REFUSAL: [T1, T1], RENUMBER: [T1, T1], UNMENDED: [T1, T1],
-  ECOSYS: [CLASS_FLOOR, CLASS_FLOOR - 1], GARBLED: [GARBLED, GARBLED],
+  ECOSYS: [CLASS_FLOOR, CLASS_FLOOR - 1], GARBLED: [GARBLED, GARBLED], DECISIVE: [T1 + 10, T1 + 10], BORDER: [T1 + 2, T1 - 3],
 };
 
 const WORDY = ["WORDY", "REFUSAL", "RENUMBER", "UNMENDED"];
@@ -125,6 +128,28 @@ test("the score is the type's weighted axes, held low when the material is too t
   assert.deepEqual([res!.output!.selected, res!.output!.score], [false, SELECTION.thinCap], `axes worth ${T1 + 10} count as ${SELECTION.thinCap}`);
   assert.deepEqual(calls("GARBLED").sort(), ["prefilter", "score", "score", "structure", "summarize"], "written by the cheaper title/summary prompt");
   assert.equal((await row(id)).output.scoreAxes[0].thin, true);
+});
+
+test("a first score far from every line a score decides is the only one asked", async () => {
+  const pack = SELECTION as { secondScoreWithin: number };
+  const within = pack.secondScoreWithin;
+  pack.secondScoreWithin = 5; // a margin a site could calibrate
+  try {
+    assert.ok(!needsSecondScore(T1 + 10, T1) && needsSecondScore(T1 + 2, T1), "the cases need T1 + 10 far from the threshold and both floors, T1 + 2 near");
+    const far = await article("DECISIVE");
+    const res = await analyzeArticle(far);
+    assert.deepEqual([res!.output!.selected, res!.output!.score, res!.output!.scores], [true, T1 + 10, [T1 + 10]]);
+    assert.deepEqual(calls("DECISIVE").sort(), ["prefilter", "score", "structure", "understand"], "one score call");
+    assert.equal((await row(far)).receipt_ids.length, 4);
+    const near = await analyzeArticle(await article("BORDER"));
+    assert.deepEqual([near!.output!.selected, near!.output!.scores], [false, [T1 + 2, T1 - 3]], "near the threshold the second score is asked, and the mean decides");
+    // An evaluation asks both, then replays what production would have decided at each threshold.
+    const both = { model: "m", threshold: T1, values: [T1 + 10, T1 - 20], axes: [scoreAnswer(T1 + 10), scoreAnswer(T1 - 20)], receiptIds: [1, 2], reused: true };
+    assert.deepEqual(decidingScores(both, T1)!.values, [T1 + 10], "far from every line, the first decides alone");
+    assert.deepEqual(decidingScores(both, T1 + 9)!.values, [T1 + 10, T1 - 20], "near a threshold being swept, both decide");
+  } finally {
+    pack.secondScoreWithin = within;
+  }
 });
 
 test("a word the site keeps from readers goes back once to be changed; copy without one is not sent", async () => {
@@ -290,7 +315,9 @@ test("after the admin gives a source a class, analysing again holds the paid sco
   await updateSource(CLASSED_SOURCE, { patch: { selection_class: CLASS }, version: await version(), reason: "test" }, "test");
   const hits = provider.hits();
   const again = await analyzeArticle(id);
-  assert.equal(provider.hits(), hits, "the same paid answers: the class is not part of any model input");
+  // The same paid answers (the class is not part of any model input); the second score is asked now only if
+  // the first decided alone against the lower threshold, and lies near the class floor.
+  assert.equal(provider.hits() - hits, needsSecondScore(CLASS_FLOOR, T1) ? 0 : 1);
   assert.deepEqual([again!.output!.selected, again!.output!.score, (await row(id)).output.threshold], [false, CLASS_FLOOR - 1, CLASS_FLOOR]);
   const created = await createSource({ id: `test-classed-new-${T}`, name: "Created with a class", kind: "rss", config: { feedUrl: `https://example.com/feed-${T}.xml` }, tier: "T1", selection_class: CLASS }, "test");
   assert.equal(created.created && created.source.selection_class, CLASS, "a new source can start with a class");
