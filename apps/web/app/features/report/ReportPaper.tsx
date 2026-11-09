@@ -22,9 +22,12 @@ import { Nameplate } from "./Nameplate";
 import { IssueDots } from "./IssueDots";
 import { Picture } from "../../components/ui/Picture";
 import { monthDay } from "../../lib/format.ts";
+import { inNav } from "../../components/shell/nav";
 import { EDITION, MOTTO, dateLine, dateMark, headline, metricItems, neighbourLabel, reportPath, shortDay } from "./format";
 
 const pad = (n: number) => String(n).padStart(2, "0");
+/** A weekly's topics 上升中, its last page; none on a site that keeps the topics out of its navigation. */
+const risingOf = (report: ReportDetail) => (inNav("/topics") ? report.rising ?? [] : []);
 const keyOf = (c: ReportCitation) => c.itemId ?? c.title;
 const anchorOf = (c: ReportCitation) => (c.itemId ? `r-${c.itemId}` : null);
 const LINK = "inline-flex min-h-7 items-center gap-0.5 font-medium transition-colors hover:text-accent";
@@ -301,7 +304,12 @@ function FrontPage({ report, pages, leadStory, count }: { report: ReportDetail; 
   const highlights = report.highlights.filter((h) => !leadStory || keyOf(h) !== keyOf(leadStory)).slice(0, 3);
   const inPage = new Set(pages.flatMap((p) => p.items.map((c) => c.itemId)).filter(Boolean));
   const period = daily ? "今日" : report.kind === "weekly" ? "本周" : "本月";
-  const index = [...pages.map((p) => ({ id: p.id, label: p.label, n: `${p.items.length} 件` })), ...(report.flashes.length > 0 ? [{ id: "s-flash", label: "快讯", n: `${report.flashes.length} 条` }] : [])];
+  const rising = risingOf(report);
+  const index = [
+    ...pages.map((p) => ({ id: p.id, label: p.label, n: `${p.items.length} 件` })),
+    ...(report.flashes.length > 0 ? [{ id: "s-flash", label: "快讯", n: `${report.flashes.length} 条` }] : []),
+    ...(rising.length > 0 ? [{ id: "s-rising", label: "上升中的主题", n: `${rising.length} 个` }] : []),
+  ];
 
   return (
     <section aria-label="头版" className="grid @[880px]:grid-cols-[minmax(0,1fr)_300px] @[1040px]:grid-cols-[minmax(0,1fr)_340px]">
@@ -478,10 +486,13 @@ function History({ report, index }: { report: ReportDetail; index: ReportNavigat
 export function reportOutline(report: ReportDetail): OutlineEntry[] {
   const pages = pagesOf(report, leadStoryOf(report));
   if (pages.length === 0 && report.flashes.length === 0) return [];
+  const rising = risingOf(report);
+  const flashes = report.flashes.length > 0 ? 1 : 0;
   return [
     { id: "report-start", text: "头版", level: 2, mark: "" },
     ...pages.map((p, i) => ({ id: p.id, text: p.label, level: 2, mark: pad(i + 1), note: `${p.items.length} 件` })),
-    ...(report.flashes.length > 0 ? [{ id: "s-flash", text: "快讯", level: 2, mark: pad(pages.length + 1), note: `${report.flashes.length} 条` }] : []),
+    ...(flashes ? [{ id: "s-flash", text: "快讯", level: 2, mark: pad(pages.length + 1), note: `${report.flashes.length} 条` }] : []),
+    ...(rising.length > 0 ? [{ id: "s-rising", text: "上升中的主题", level: 2, mark: pad(pages.length + flashes + 1), note: `${rising.length} 个` }] : []),
   ];
 }
 
@@ -489,6 +500,7 @@ export function ReportPaper({ report, index }: { report: ReportDetail; index: Re
   const daily = report.kind === "daily";
   const leadStory = leadStoryOf(report);
   const pages = pagesOf(report, leadStory);
+  const rising = risingOf(report);
   const count = pages.reduce((sum, p) => sum + p.items.length, 0) + (leadStory ? 1 : 0);
   // Only a daily comes out with nothing in it: a day the editors judged with nothing new (REPORTS.quiet).
   const quiet = count === 0 && report.flashes.length === 0;
@@ -547,6 +559,26 @@ export function ReportPaper({ report, index }: { report: ReportDetail; index: Re
                   {f.available && <span className="ml-2 text-[12px] text-ink-4">{f.sourceName}</span>}
                   {f.available && f.followUp && <Badge className="ml-2 align-[1px]" title={`${monthDay(f.followUp)}的日报报道过这件事，这里是新进展`}>跟进</Badge>}
                 </span>
+              </li>
+            ))}
+          </ul>
+        </SectionPage>
+      )}
+
+      {rising.length > 0 && (
+        <SectionPage id="s-rising" no={pages.length + (report.flashes.length > 0 ? 1 : 0) + 1} label="上升中的主题">
+          <p className="border-b border-line py-5 text-[15.5px] leading-[1.9] text-ink-2">
+            本周有一天明显比平时热的主题：那天报道它的事件占当天全部事件的比例，是平时的几倍。
+          </p>
+          <ul className={COLUMNS}>
+            {rising.map((t) => (
+              <li key={t.slug} className="break-inside-avoid border-b border-line py-3">
+                <IntentLink viewTransition to={`/topics/${t.slug}`} className="group flex items-baseline justify-between gap-4">
+                  <span className="min-w-0 text-[15px] font-bold leading-[1.55] text-ink transition-colors group-hover:text-accent">{t.name}</span>
+                  <span className="shrink-0 text-[12.5px] text-ink-4">
+                    {monthDay(t.day)} <span className="num">{t.stories}</span> 个事件 · 平时的 <span className="num">{t.ratio}</span> 倍
+                  </span>
+                </IntentLink>
               </li>
             ))}
           </ul>

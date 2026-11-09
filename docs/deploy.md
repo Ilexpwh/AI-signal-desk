@@ -62,6 +62,12 @@ MCP 默认接受 `SITE_URL` 的主机以及 `localhost`、`127.0.0.1`、`[::1]`�
 
 ### 更新
 
+**主题的“上升中”（AI-signal-desk）**：迁移 `0130` 新建 `topic_trends` 表，照下面的命令更新时 setup 会跑它，不改已有的数据。worker 多了每天 00:20 的定时任务 `topics.trend`：按北京时间的日子数每个主题有多少个事件被 `editorial` 信源报道、占当天全部这类事件的比例，和它前 28 天的平均比，见 [把它改成你的行业](customize.md#2-分类标签和主题industrytaxonomytsindustrytopicsjson)。不调用模型，没有新环境变量。要注意：
+
+- 升级后第一次运行就算出最近 7 天（前 28 天的平均从已有的热度证据里现算，不用回填）；更早的日子没有记录，升级前出过的周报也没有“上升中的主题”这一版。
+- **`industry/taxonomy.ts` 多了 `TOPIC_RISING`**（默认 `{ minStories: 3, ratio: 3 }`，偏保守的起始值）。自己改过这个文件的，合并时补上，不补通不过类型检查。站点跑上几周后按上面链接里的查询看 `topic_trends`，再定门槛。
+- 主题页、主题目录和网站接口 `/api/site/topics`、`/api/site/topics/<slug>` 的主题多了 `rising`（不上升时是 `null`）；每一期周报（`/api/site/reports/weekly/<周>`）多了 `rising`。公开接口 `/api/v1`、RSS 和 MCP 没有变化。导航里隐藏了 `"/topics"` 的站，周报不显示这一版。
+
 **评分改为五个维度（AI-signal-desk）**：评分模型不再自己算总分，改为输出内容类型、五个维度（0–10）和 `thin`，总分由 `industry/selection.ts` 新增的 `weights`（每个内容类型一行权重，和原来提示词里的权重表相同）与 `thinCap` 合成。没有数据库迁移，没有新环境变量；已经判过的资料不会重算，之后的新资料按新格式评分，五个维度存在判断记录的 `output.scoreAxes` 里。要注意：
 
 - **自己改过 `industry/prompts/selection-score.md` 的**，合并时把输出改成新的七个字段（见示范提示词末尾），并把权重表搬到 `industry/selection.ts` 的 `weights`；还在输出 `attentionScore` 的提示词会让每次评分都因格式不对而失败。
