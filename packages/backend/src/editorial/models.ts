@@ -83,18 +83,21 @@ export function modelSupportsVision(model: string): boolean {
   return MODELS[model]?.vision === true;
 }
 
-/** Whether a step can use a registered model. A model that reads images writes text as well. */
-export function capabilityAcceptsModel(capability: Capability, model: { vision?: boolean }): boolean {
-  return !capability.vision || model.vision === true;
+/** Whether a step can use a registered model: a chat model, that reads images when the step needs it. */
+export function capabilityAcceptsModel(capability: Capability, model: { vision?: boolean; api?: string }): boolean {
+  return !model.api && (!capability.vision || model.vision === true);
 }
+
+/** A registered chat model; a decision service (preset `api`) is passed over like an unknown name. */
+const chatModel = (name: string | undefined): name is string => !!name && !!MODELS[name] && !MODELS[name]!.api;
 
 /** The model a capability uses now: admin switch, else environment, else the code default. */
 export async function modelFor(capability: CapabilityKey | (string & {})): Promise<string> {
   const c = capabilities()[capability];
   if (!c) throw new Error(`unknown model step: ${capability}`);
   const held = (await switches())[capability];
-  const chosen = held && MODELS[held] ? held : process.env[c.env] ?? c.default;
-  return MODELS[chosen] ? chosen : c.default;
+  const chosen = chatModel(held) ? held : process.env[c.env] ?? c.default;
+  return chatModel(chosen) ? chosen : c.default;
 }
 
 /** Where the current choice comes from, for the admin page; `invalid` is an unregistered name passed over to reach it. */
@@ -104,12 +107,12 @@ export async function modelSources(): Promise<Record<string, { model: string; so
   for (const [key, c] of Object.entries(capabilities())) {
     const pick = held[key];
     const env = process.env[c.env];
-    if (pick && MODELS[pick]) {
+    if (chatModel(pick)) {
       out[key] = { model: pick, source: "admin" };
       continue;
     }
-    const invalid = pick ?? (env && !MODELS[env] ? env : undefined);
-    out[key] = { ...(env && MODELS[env] ? { model: env, source: "env" as const } : { model: c.default, source: "default" as const }), ...(invalid ? { invalid } : {}) };
+    const invalid = pick ?? (env && !chatModel(env) ? env : undefined);
+    out[key] = { ...(chatModel(env) ? { model: env, source: "env" as const } : { model: c.default, source: "default" as const }), ...(invalid ? { invalid } : {}) };
   }
   return out;
 }

@@ -148,3 +148,21 @@ FROM judged GROUP BY m ORDER BY m;
 ## 换模型
 
 后台“模型与评测”页能看到每一步当前用哪个模型、近期的成功率、耗时和 token 用量，也能直接切换（只影响之后的新任务）。换评分模型之前，先用 `--models` 在同一批样本上比一比。
+
+## 试用 Jev
+
+[Jev](https://typesafe.ai)（TypeSafe 的 System One）不写文字，只回答判断题：选择题给出每个选项的概率，分级题给出每一级的概率，是非题给出“是”的概率。预筛和评分本来就是判断，`industry/decisions.ts` 把 `prompts/prefilter.md` 和 `prompts/selection-score.md` 的标准改写成了这样的题目：预筛是 PASS / BLOCK / UNKNOWN 三选一；评分是内容类型、五个维度各五级（0、2.5、5、7.5、10 分）和“材料是否残缺”，再按 `industry/selection.ts` 的权重合成 0–100 的分数分布，和模型评分是同一个口径。
+
+现在它**不决定任何结果**，只用来比较。要不要换，按下面三步来：
+
+1. **配好 key**：`.env` 里填 `TYPESAFE_API_KEY`（地址默认 `https://api.typesafe.ai/v1`，要改填 `TYPESAFE_BASE_URL`）。每条资料的标题、发布时间和正文开头（`stateChars`，默认 2000 字）会发给 TypeSafe，它是美国的服务，先确认你的信源条款和隐私说明允许。调用按输入 token 计费，回执里记的是估算的美元费用，预算熔断是后台“设置”里的 `typesafe`（worker 启动时补上默认值，改过的不动）。
+2. **在样本集上比**：`node --env-file=.env scripts/eval-selection.ts --split development --models default,jev --prefilter jev`。`jev` 一栏的分数是它的中位分；报告多了 `cascadeRate`（在 `--floor` 的把握下它不敢自己下结论、要交给模型的比例）和 `aloneAccuracy`（它自己下结论的那些的准确率），用了 `--prefilter jev` 还有 `prefilterCascadeRate`。在样本集上明显比现在的模型差，就到此为止。
+3. **在真实流量上影子运行**：后台“模型与评测”页，预筛或评分那一步点“影子运行”，选 `jev`。之后每 5 分钟，它对这一步新做的判断（两天内、当前版本的资料）各答一遍，最多 100 条，只记回执，不改分数、不改精选，读者看不到任何变化；同一条资料、同一套题目只问一次。跑满两周后：
+
+   ```bash
+   node --env-file=.env scripts/eval-jev-shadow.ts --days 14
+   ```
+
+   报告给出预筛的混淆矩阵（行是模型的判断，列是 Jev 的），评分的平均差和一条保序映射 `scale`（把 Jev 的分数换算到模型评分的口径），以及每个把握下限它自己下结论的比例和这时与模型的分歧（三条线：门槛、写作下限、浏览下限，任何一条站错边都算分歧）。`oneCallDisagreement` 是同样口径下“一次模型评分”和“两次平均”的分歧：选一个分歧不高于它、自己下结论的比例又值得的下限。
+
+题目的措辞是站点的判断标准，按 `prompts/` 的同一套原则改：改了题目，题目版本跟着变，旧回执不再复用，影子运行会对新判断重新问。`confidence` 和 `scale` 在影子报告和样本评测都看过之前保持 `null` 和空数组。真要让它替某一步做判断，是另一次改动：在留出集上重新评测，确认准确率和 F1 在误差范围内，再把影子运行的代码换成正式的分流。

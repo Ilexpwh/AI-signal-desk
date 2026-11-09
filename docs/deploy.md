@@ -69,6 +69,8 @@ MCP 默认接受 `SITE_URL` 的主机以及 `localhost`、`127.0.0.1`、`[::1]`�
 - 上线前后各用 `scripts/eval-selection.ts` 在自己标注的样本上跑一遍（见 [精选与校准](selection.md)），门槛只在扫描结果的最佳值移动时再改。
 - `industry/selection.ts` 还多了 `secondScoreWithin`（默认 `101`，总是评两次，和原来一样）：第一次评分离门槛和两条下限都足够远时不评第二次。改小之前按 [精选与校准](selection.md#4-少评一次分校准-secondscorewithin) 用已有记录校准。
 
+**试用 Jev（AI-signal-desk）**：新增选填的 `TYPESAFE_BASE_URL`、`TYPESAFE_API_KEY`，`site/models.ts` 多了预设 `jev`（`api: "systemone"`，只能影子运行，不能切换成某一步的模型，环境变量里填给某一步会被当作无效名称略过），`industry/decisions.ts` 是它的判断题。没有数据库迁移：worker 启动时在 `budgets` 补一行 `typesafe`（已有的不动），后台“模型与评测”的“影子运行”开关存在 `settings` 的 `shadow.prefilter`、`shadow.score`，新的定时任务 `models.shadow` 只在开关打开时调用。不填 key、不打开开关就什么都不会发出去。自己维护 `site/models.ts` 的站，不想要这个预设可以删掉，删掉后影子运行的按钮不再出现。怎么试见 [精选与校准](selection.md#试用-jev)。后台的 token 列现在也算上 `input_tokens`、`output_tokens` 这种用量写法。
+
 **2026 年 10 月 31 日的引擎同步**有三个数据库迁移（`0090`–`0092`），照下面的命令更新时 setup 会跑它们：信源多一列可选的类别 `selection_class`，反馈多了 `kind`（类型）和 `idea`（归入的建议）两列，都可以为空，旧数据不用改。没有必填的新环境变量。要注意的变化：
 
 - **`industry/selection.ts` 多了 `classes` 和 `browseFloor`**，见 [精选与校准](selection.md#门槛industryselectionts)；自己改过这个文件的，合并时补上这两项，不补通不过类型检查。

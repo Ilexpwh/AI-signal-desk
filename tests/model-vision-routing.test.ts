@@ -1,5 +1,5 @@
 // Which models the admin may choose for a step: only a step that needs images refuses a text model.
-// A name no model answers to is passed over, and the admin page is told which one.
+// A name no model answers to, or a decision service's, is passed over, and the admin page is told which one.
 import "./setup.ts";
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
@@ -55,6 +55,11 @@ test("a switch or environment variable naming no model is passed over and report
     process.env[env] = "deepseek-flash";
     await pin(null);
     assert.deepEqual(await source(), { model: "deepseek-flash", source: "env" });
+
+    // A decision service answers questions, not prompts: named for a step, it is passed over like an unknown name.
+    process.env[env] = "jev";
+    assert.deepEqual(await source(), { model: CAPABILITIES.score.default, source: "default", invalid: "jev" });
+    assert.equal(await modelFor("score"), CAPABILITIES.score.default);
   } finally {
     await pin(null);
     if (before === undefined) delete process.env[env]; else process.env[env] = before;

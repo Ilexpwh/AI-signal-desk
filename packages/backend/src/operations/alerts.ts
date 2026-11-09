@@ -347,6 +347,7 @@ const PROVIDERS: Record<string, { name: string; where: string; stops?: string }>
   socialdata: { name: "SocialData", stops: "X（推特）上的新内容收不到", where: "SocialData 后台" },
   jina: { name: "Jina", stops: "部分文章取不到正文", where: "Jina 后台" },
   dajiala: { name: "极致了（Dajiala）", stops: "公众号新文章收不到", where: "极致了后台" },
+  typesafe: { name: "TypeSafe（Jev）", stops: "后台模型页的影子判断暂停，读者看到的内容不受影响", where: "TypeSafe 后台" },
 };
 export const providerName = (service: string) => PROVIDERS[service]?.name ?? service;
 export const providerStops = async (service: string, models?: ReadonlySet<string>): Promise<string> => {

@@ -28,7 +28,7 @@
 [`industry/taxonomy.ts`](../industry/taxonomy.ts) 定义类别（`CATEGORIES`）、报头重点发布计数（`RELEASE`）、总述免核对通用词（`PLAIN_TERMS`）、内容类型（`ITEM_TYPES`）、标签词表与近义词（`CATEGORY_TAGS`、`TOPIC_TAGS`、`ENTITY_TAGS`、`TAG_SYNONYMS`），以及公司名录和防张冠李戴词典（`ENTITIES`、`IDENTITY_LEXICON`、`PUBLISHER_DOMAINS`、`IDENTITY_CONTEXT_ALIASES`）。各字段含义直接看文件内注释，改动时注意这几处联动：
 
 - **网址里的 `key` 上线后不改**：`CATEGORIES` 的 `key` 会进网址和订阅地址（`/all?category=`、`/feed/category/<key>.xml`）。要让某一类在公开接口、RSS 和 MCP 里并进另一类发布（网页上仍分开），在 `site/site.ts` 的 `PUBLIC_CATEGORIES` 里配。
-- **和提示词同步**：改了 `CATEGORIES`、标签词表或 `ITEM_TYPES`，要同步改 `industry/prompts/structure.md`（归类原则与标签规则）、`content-understanding.md`（内容类型枚举）、`selection-score.md`（内容类型的说明）和 `industry/selection.ts` 的 `weights`（每个内容类型的五维权重）。
+- **和提示词同步**：改了 `CATEGORIES`、标签词表或 `ITEM_TYPES`，要同步改 `industry/prompts/structure.md`（归类原则与标签规则）、`content-understanding.md`（内容类型枚举）、`selection-score.md`（内容类型的说明）和 `industry/selection.ts` 的 `weights`（每个内容类型的五维权重）；`industry/decisions.ts`（试用 Jev 的判断题）里的内容类型选项也跟着改，不改通不过类型检查。
 - **不需要防张冠李戴时可清空**：`IDENTITY_LEXICON`、`PUBLISHER_DOMAINS`、`IDENTITY_CONTEXT_ALIASES` 用来保证标题摘要里提到的公司在原文里出现过；你的行业不需要这项检查时设为空数组 `[]`。
 - **`industry/topics.json`**（主题目录 `/topics`）：站点启动时读取，改完重新构建（`docker compose up -d --build`）生效。分 `company`（公司与机构）、`field`（方向）、`genre`（内容形态）三组，`slug` 上线后不要改：
   - `company` 主题用 `entityId`（`ENTITIES` 的 id）收以这家公司为主体的报道；一篇报道的主体有几家公司时，标题里点了它的名才算。可选 `aliases`：搜索框里只搜这个词，也能找出这家公司的报道。
