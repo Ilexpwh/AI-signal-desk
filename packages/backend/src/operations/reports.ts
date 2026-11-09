@@ -52,6 +52,40 @@ async function sourceChanges(since: Date): Promise<string[]> {
 }
 
 /**
+ * How a list's items spread over sources, from each source's count: how many sources, the share of the
+ * three largest, and Shannon evenness (H / ln S: 1 when every source has as many, toward 0 as a few
+ * fill the list; none for a single source).
+ */
+function spread(counts: number[]): string {
+  const total = counts.reduce((a, b) => a + b, 0);
+  const top3 = [...counts].sort((a, b) => b - a).slice(0, 3).reduce((a, b) => a + b, 0) / total;
+  const entropy = -counts.reduce((sum, c) => sum + (c / total) * Math.log(c / total), 0);
+  const evenness = counts.length > 1 ? (entropy / Math.log(counts.length)).toFixed(2) : "—";
+  return `来自 ${counts.length} 个信源，前三个占 ${Math.round(top3 * 100)}%，均匀度 ${evenness}`;
+}
+
+/** This week's 精选 and dailies by source: whether a few sources fill what readers get. */
+async function sourceSpread(since: Date, now: Date): Promise<string[]> {
+  const [selected, daily, [issues]] = await Promise.all([
+    sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM publications p
+      WHERE p.selected AND p.visibility <> 'withdrawn' AND p.discovered_at >= ${since} GROUP BY p.source_id`,
+    // A daily's entries and flashes, each by the source it leads with.
+    sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM reports r
+      CROSS JOIN LATERAL (SELECT jsonb_path_query(r.content, '$.sections[*].items[*]') UNION ALL SELECT jsonb_path_query(r.content, '$.flashes[*]')) entry(e)
+      WHERE r.kind = 'daily' AND r.window_end > ${since} AND r.window_end <= ${now} AND e->>'sourceId' IS NOT NULL
+      GROUP BY e->>'sourceId'`,
+    sql<{ n: number }[]>`SELECT count(*)::int AS n FROM reports WHERE kind = 'daily' AND window_end > ${since} AND window_end <= ${now}`,
+  ]);
+  const counts = (rows: { n: number }[]) => rows.map((r) => r.n);
+  return [
+    ...(selected.length ? [`本周精选${spread(counts(selected))}`] : []),
+    ...(daily.length ? [`本周 ${issues!.n} 期日报的 ${n(daily.reduce((sum, r) => sum + r.n, 0))} 条（含快讯）${spread(counts(daily))}`] : []),
+  ];
+}
+
+/**
  * Monday 09:00: the week in a few lines, and what agents changed. Per-source lists stay out: nobody can act on
  * 160 quiet sources in a chat message; the Monday patrol checks them from sourceHealth(), the daily follow-ups name failures.
  */
@@ -75,6 +109,7 @@ export async function sourceHealthWeekly(now = Date.now()) {
   const lines = [
     `本周收录 ${n(items!.week)} 条（上周 ${n(items!.prev)}，${pct(items!.week, items!.prev)}），其中精选 ${n(items!.selected)} 条`,
     `在用信源 ${counts!.enabled} 个，本周新增 ${counts!.added} 个；抓取失败 ${counts!.failing} 个，不太稳定 ${counts!.degraded} 个`,
+    ...(await sourceSpread(since, new Date(now))),
   ];
   if (served.length) {
     const perUse = new Map<string, number>();
