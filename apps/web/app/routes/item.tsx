@@ -626,6 +626,9 @@ function ItemView({ item, followups }: Loaded) {
               {isX ? item.x!.authorName : item.source.name}
             </a>
             <span> · {hostOf(item.links.original)}</span>
+            {/* A mistake in the title, summary, translation or grouping, reported with the page it was seen on. */}
+            <span> · </span>
+            <Link viewTransition to={`/feedback?from=${encodeURIComponent(`/items/${item.id}`)}`} className="text-ink-3 hover:text-accent">报错</Link>
           </p>
 
           {(daily || item.topics.length > 0 || tags.length > 0) && (
