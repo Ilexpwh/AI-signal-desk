@@ -436,7 +436,8 @@ test("the weekly report names the few sources most often first to report, with t
   const fast = await source("first-fast");
   const slow = await source("first-slow");
   const [fact] = await sql`INSERT INTO facts (public_id, title) VALUES (${`${T}-fact`}, 'shared fact') RETURNING id`;
-  for (const [sourceId, hours, selected] of [[fast, 6, true], [slow, 2, false]] as const) {
+  // Last week's reports: inside the 30 days, outside this week's spread of 精选 (the next test counts that).
+  for (const [sourceId, hours, selected] of [[fast, 8 * 24 + 6, true], [slow, 8 * 24 + 2, false]] as const) {
     const id = `${sourceId}-report`;
     const at = new Date(now - hours * 3600_000);
     await sql`INSERT INTO articles(id,source_id,identity_key,url,title,published_at,discovered_at,timeline_at)
