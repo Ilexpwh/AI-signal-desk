@@ -253,6 +253,8 @@ export interface StoryReportView {
   source: SourceRef & { firstParty: boolean };
   publishedAt: string;
   selected: boolean;
+  /** 首发: its fact's earliest report from T1 or the subject's own verified account. */
+  firstRelease: boolean;
 }
 
 export interface StoryFactView {
@@ -276,6 +278,8 @@ export interface StoryDetail {
   status: "active" | "watching" | "settled";
   reportCount: number;
   sourceCount: number;
+  /** 单一来源: one independent participant reports it, and none of its reports is T1 or the subject's own account. */
+  singleSource: boolean;
   firstReportAt: string | null;
   latestAt: string | null;
   digest: string | null;

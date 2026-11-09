@@ -30,6 +30,21 @@ export type RepresentativeRow = Partial<RepresentativeIdentity> & {
   timeline_at: Date;
 };
 
+/**
+ * 首发: of each fact's first-hand reports (`first_hand`: T1 or a verified account of the fact's own subject,
+ * representativePriority below 3), the earliest by publication time, ties by id.
+ */
+export function firstReleases<T extends { id: string; fact_id: number; at: Date; first_hand: boolean }>(rows: T[]): Set<string> {
+  const first = new Map<T["fact_id"], T>();
+  for (const r of rows) {
+    if (!r.first_hand) continue;
+    const seen = first.get(r.fact_id);
+    const gap = seen ? r.at.getTime() - seen.at.getTime() : -1;
+    if (gap < 0 || (gap === 0 && r.id < seen!.id)) first.set(r.fact_id, r);
+  }
+  return new Set([...first.values()].map((r) => r.id));
+}
+
 /** Within the caller's existing fact/candidate scope: T1, verified publisher, full text, score, time. */
 export function pickRepresentative<T extends RepresentativeRow>(rows: T[]): T {
   return [...rows].sort((a, b) => representativePriority(a) - representativePriority(b)

@@ -430,6 +430,26 @@ test("the weekly report names sources paused or partly excluded this week, with 
   assert.doesNotMatch(text, new RegExp(`· ${earlier}`), "a source paused before this week is not listed as paused this week");
 });
 
+// Evidence for tiers, not a ranking to act on by itself: the few sources most often first with something
+// others reported too, each with what it brought in and how much of it was selected.
+test("the weekly report names the few sources most often first to report, with their items and selected rate", async () => {
+  const fast = await source("first-fast");
+  const slow = await source("first-slow");
+  const [fact] = await sql`INSERT INTO facts (public_id, title) VALUES (${`${T}-fact`}, 'shared fact') RETURNING id`;
+  for (const [sourceId, hours, selected] of [[fast, 6, true], [slow, 2, false]] as const) {
+    const id = `${sourceId}-report`;
+    const at = new Date(now - hours * 3600_000);
+    await sql`INSERT INTO articles(id,source_id,identity_key,url,title,published_at,discovered_at,timeline_at)
+      VALUES(${id},${sourceId},${id},${`https://example.test/${id}`},${id},${at},${at},${at})`;
+    await sql`INSERT INTO publications(article_id,source_id,title,url,channel,timeline_at,discovered_at,published_at,sort_at,fact_id,selected)
+      VALUES(${id},${sourceId},${id},${`https://example.test/${id}`},'news',${at},${at},${at},${at},${fact!.id},${selected})`;
+    await sql`INSERT INTO fact_articles(fact_id,article_id,role) VALUES(${fact!.id},${id},'report')`;
+  }
+  const text = await weekly();
+  assert.match(text, new RegExp(`最常首报的信源[^\\n]*\\n· ${fast}（T2）：首报 1/1，收录 1，精选率 100%`));
+  assert.doesNotMatch(text, new RegExp(`· ${slow}（`), "a source never first is not named");
+});
+
 test("sources only a module uses are counted and named on their own, apart from the news sources", async () => {
   const counts = async () => Number(/在用信源 (\d+) 个/.exec(await weekly())![1]);
   const before = await counts();

@@ -18,6 +18,7 @@ import { overrideFields, setVisibility } from "@aihot/backend/admin/content";
 import { stopBoss } from "@aihot/backend/jobs/queue";
 import { latestHotRanking } from "@aihot/backend/publication/hot";
 import { storyTexts } from "@aihot/backend/publication/story-text";
+import { storyAnswer } from "@aihot/backend/publication/agent";
 
 const key = `evidence-${tag()}`;
 const now = new Date();
@@ -127,6 +128,62 @@ test("mentions cannot choose a timeline origin, anchor, representative, or a lat
   assert.equal((await v1Story(g.storyId))!.story.latest, after.latest);
   const firstParty = await loadTimeline({ ...q, channel: "firstParty" });
   assert.ok(!firstParty.cards.some(c => c.item.id === official), "a stale true projection flag cannot put T1_5 into first-party channel");
+});
+
+// 首发 is the party's own release, not whoever was fastest: a media scoop or an earlier roundup mention
+// cannot take it, and every exit marks the same report; the digest reads it before the reports relaying it.
+test("each fact's earliest official or owner report is its 首发 on the story page, every machine exit and the digest", async () => {
+  const media = await source("first-media", "T2");
+  const organization = await source("first-organization", "T1_5", "openai", "organization");
+  const t1 = await source("first-t1", "T1");
+  const g = await story();
+  const scoop = await report(media, g, { title: "媒体抢先报道 Dots", hours: 6 });
+  const release = await report(organization, g, { title: "OpenAI 账号发布 Dots", hours: 5 });
+  const blog = await report(t1, g, { title: "官网随后发布 Dots", hours: 4 });
+  const mention = await report(t1, g, { title: "更早的周报顺带提到", hours: 8, role: "mention" });
+  const [other] = await sql`INSERT INTO facts (public_id,story_id,title,subject) VALUES (${`f-${randomUUID()}`},${g.storyId},'Dots 上架应用商店','OpenAI') RETURNING id`;
+  const relayed = await report(media, { ...g, factId: Number(other!.id) }, { title: "媒体转述上架消息", hours: 2 });
+
+  const site = (await loadStoryDetail(g.storyId, now))!;
+  const marked = (rows: { id: string; firstRelease: boolean }[]) => rows.filter((r) => r.firstRelease).map((r) => r.id);
+  assert.deepEqual(marked(site.timeline), [release], "only the owner's account, before T1, and the fact without an official report has none");
+  assert.ok(site.timeline.some((r) => r.id === mention) && site.timeline.some((r) => r.id === scoop));
+  assert.deepEqual(marked(site.officialReports), [], "the T1 blog came later");
+  const api = (await v1Story(g.storyId))!.story;
+  assert.deepEqual(marked(api.reports), [release]);
+  assert.equal(site.singleSource, false);
+  assert.equal(api.singleSource, false);
+  assert.match(storyAnswer(api, 20, "http"), /OpenAI 账号发布 Dots/);
+  assert.match(storyAnswer(api, 20, "http"), /first-organization（首发）/);
+
+  assert.equal((await composeStoryDigest(g.storyId)).updated, true);
+  const lines = digestPrompt.split("\n").filter((line) => line.includes("报道 ") && line.includes("｜事实 "));
+  assert.equal(lines[0], lines.find((line) => line.includes(release)), "the 首发 is listed first");
+  assert.ok(lines[0]!.startsWith("【新】【首发】报道"));
+  assert.deepEqual(lines.slice(1).map((line) => [scoop, blog, relayed].find((id) => line.includes(id))), [scoop, blog, relayed], "the rest by time");
+  assert.match(digestPrompt, /标【首发】的是官方或当事方自己的账号/);
+});
+
+// 单一来源 counts independent actors, as heat does: two outlets of one media matrix are one; an official or
+// owner report is never single-sourced.
+test("a story only one participant reports, none of it official or the owner's, is single-source", async () => {
+  const a = await source("single-a", "T2");
+  const b = await source("single-b", "T2");
+  await sql`UPDATE sources SET signal_group_id = ${`${key}-matrix`} WHERE id IN ${sql([a, b])}`;
+  const g = await story();
+  await report(a, g, { title: "同一媒体矩阵的报道", hours: 3 });
+  await report(b, g, { title: "同一媒体矩阵的转载", hours: 2 });
+  const site = (await loadStoryDetail(g.storyId, now))!;
+  assert.equal(site.sourceCount, 2);
+  assert.equal(site.singleSource, true);
+  assert.equal((await v1Story(g.storyId))!.story.singleSource, true);
+  assert.match(storyAnswer((await v1Story(g.storyId))!.story, 20, "http"), /单一来源[^\n]*\n[\s\S]*只有一个来源在报道/);
+  await report(await source("single-other", "T2"), g, { title: "另一家独立报道", hours: 1 });
+  assert.equal((await loadStoryDetail(g.storyId, now))!.singleSource, false);
+
+  const owned = await story();
+  await report(await source("single-owner", "T1_5", "openai", "organization"), owned, { title: "OpenAI 账号独家发布", hours: 1 });
+  assert.equal((await loadStoryDetail(owned.storyId, now))!.singleSource, false, "the party's own account speaks for it");
 });
 
 // The detail's group badge and its expanded report list must count the same evidence, even while

@@ -11,6 +11,8 @@ const ReportSchema = z.strictObject({
   publishedAt: z.iso.datetime({ offset: true }),
   source: z.string().min(1),
   firstParty: z.boolean().default(false),
+  /** T1 or the fact subject's own verified account: each fact's earliest is its 首发. Defaults to firstParty. */
+  firstHand: z.boolean().optional(),
   title: z.string().min(1),
   summary: z.string().nullable().default(null),
   fact: z.strictObject({
@@ -57,6 +59,7 @@ export function caseFromStory(story: { publicId: string; title: string; hasDiges
       publishedAt: report.at.toISOString(),
       source: report.source_name,
       firstParty: report.first_party,
+      firstHand: report.first_hand,
       title: report.title,
       summary: report.summary,
       fact: {
@@ -82,6 +85,7 @@ export function toDigestInput(row: DigestEvalCase) {
       summary: report.summary,
       source_name: report.source,
       first_party: report.firstParty,
+      first_hand: report.firstHand ?? report.firstParty,
       at: new Date(report.publishedAt),
       fact_id: report.fact.id,
       fact_subject: report.fact.subject,

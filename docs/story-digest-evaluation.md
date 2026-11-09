@@ -10,7 +10,7 @@ node --env-file=.env scripts/eval-story-digests.ts --stories <事件id>,<事件i
 
 事件 id 是事件页地址 `/story/<id>` 里的那一段。导出只读数据库，不调用模型，不改动任何事件。报道按站点生成综述时的同一套规则取，只是顺带提及的、综合稿、撤下的和尚未公开的报道不算。已经有综述的事件按“更正后重写”组装（不带上一版综述），还没有综述的按首次撰写。找不到、已被合并或没有可用报道的事件会直接报错。
 
-导出的文件每行一个事件，可以先审阅。想测有新报道时的增量更新，把 `inputMode` 改为 `incremental`，填上 `story.previousDigest` 和 `knownArticleIds`（上一版已包含的报道 id）。也可以手写案例，格式见 `industry/story-digest-eval.example.jsonl`（虚构示例）。
+导出的文件每行一个事件，可以先审阅。每篇报道的 `firstHand` 标出它是不是 `T1` 或当事方核实过的账号发的；每个事实里这样的报道最早的一篇是首发，和站点一样排在输入最前面。手写案例不写 `firstHand` 时按 `firstParty` 算。想测有新报道时的增量更新，把 `inputMode` 改为 `incremental`，填上 `story.previousDigest` 和 `knownArticleIds`（上一版已包含的报道 id）。也可以手写案例，格式见 `industry/story-digest-eval.example.jsonl`（虚构示例）。
 
 ## 2. 并排对比
 

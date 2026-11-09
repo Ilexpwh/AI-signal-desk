@@ -17,6 +17,7 @@ import { fetchRss } from "../sources/rss.ts";
 import { assertSupportedConfig, UnsupportedConfig } from "../sources/config-keys.ts";
 import { applyUsePace, enrichDetails, listingEntries, storedDetails } from "../sources/collect.ts";
 import { filterPublicationWindow } from "../sources/filters.ts";
+import { sourceStats } from "../sources/stats.ts";
 import { FetchError, type Candidate, type SourceRow } from "../sources/types.ts";
 import { fetchWebList } from "../sources/web-list.ts";
 import { fetchXSearch } from "../sources/x.ts";
@@ -35,15 +36,17 @@ export interface SourceListFilters {
   page?: number;
 }
 
+/** The list's 30-day columns, read for the page's sources by sourceStats. */
+type Stats30d = Pick<AdminSourceRow, "items_30d" | "selected_30d" | "shared_30d" | "first_30d">;
+
 export async function listSources(f: SourceListFilters): Promise<BeforeJson<AdminSources>> {
   const page = Math.max(1, f.page ?? 1);
   const q = f.q?.trim() ? `%${f.q.trim()}%` : null;
   const [rows, [totals]] = await Promise.all([
-    sql<BeforeJson<AdminSourceRow>[]>`
+    sql<Omit<BeforeJson<AdminSourceRow>, keyof Stats30d>[]>`
     SELECT s.id, s.name, s.kind, s.tier, s.selection_class, s.participation_mode, s.uses, s.enabled, s.health, s.fail_count, s.interval_minutes,
            s.last_ok_at, s.last_fetch_at, s.last_error, (s.tier = 'T1') AS first_party, s.next_fetch_at,
-           (SELECT count(*)::int FROM articles a WHERE a.source_id = s.id AND a.discovered_at > now() - interval '7 days') AS items_7d,
-           (SELECT count(*)::int FROM publications p WHERE p.source_id = s.id AND p.selected AND p.discovered_at > now() - interval '30 days') AS selected_30d
+           (SELECT count(*)::int FROM articles a WHERE a.source_id = s.id AND a.discovered_at > now() - interval '7 days') AS items_7d
     FROM (
       SELECT * FROM sources
       WHERE (${q}::text IS NULL OR name ILIKE ${q} OR id ILIKE ${q} OR config::text ILIKE ${q})
@@ -61,7 +64,14 @@ export async function listSources(f: SourceListFilters): Promise<BeforeJson<Admi
            count(*) FILTER (WHERE health = 'failing')::int AS failing, count(*) FILTER (WHERE health = 'degraded')::int AS degraded
     FROM sources`,
   ]);
-  return { page, rows, totals, useLabels: useLabels() };
+  const stats = new Map((await sourceStats(Date.now(), rows.map((r) => r.id))).map((s) => [s.id, s]));
+  return {
+    page, totals, useLabels: useLabels(),
+    rows: rows.map((r) => {
+      const s = stats.get(r.id);
+      return { ...r, items_30d: s?.items ?? 0, selected_30d: s?.selected ?? 0, shared_30d: s?.shared ?? 0, first_30d: s?.first ?? 0 };
+    }),
+  };
 }
 
 export async function sourceDetail(id: string): Promise<BeforeJson<AdminSourceDetail> | null> {
