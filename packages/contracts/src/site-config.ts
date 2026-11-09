@@ -14,6 +14,11 @@ export interface ModelPreset {
   fallbackFor?: Record<string, string>;
   /** The score step's call parameters with this model, instead of the step's own (editorial/analyze.ts). */
   scoreCall?: { temperature: number; maxTokens: number; timeoutMs: number };
+  /**
+   * A decision service instead of a chat model (TypeSafe's System One): it answers typed questions with
+   * probabilities and writes no text, so no step can use it; the admin page runs it in a step's shadow.
+   */
+  api?: "systemone";
 }
 
 /** The optional founder shown in the site's structured metadata. */

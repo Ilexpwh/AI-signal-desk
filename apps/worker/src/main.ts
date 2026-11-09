@@ -12,12 +12,14 @@ import { registerNotifyJobs } from "@aihot/backend/jobs/notify";
 import { registerPublicationJobs } from "@aihot/backend/jobs/publication";
 import { registerSchedules } from "./schedules.ts";
 import { ensureContentTargets } from "@aihot/backend/notify/deliver";
+import { ensureDecisionBudget } from "@aihot/backend/providers/typesafe";
 import { startHeartbeat } from "@aihot/backend/operations/heartbeat";
 
 installModules(SERVER_MODULES);
 assertProductionSecrets([["auth", "IMG_PROXY_SIGN_SECRET"]]);
 
 await ensureContentTargets();
+await ensureDecisionBudget();
 const boss = await getBoss({ supervise: true });
 await registerContentJobs(boss);
 if (process.env.COLLECT_ENABLED === "true") await registerSourceJobs(boss);

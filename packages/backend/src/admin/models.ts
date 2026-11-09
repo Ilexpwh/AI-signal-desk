@@ -5,6 +5,8 @@
 import type { AdminModels, BeforeJson } from "@aihot/contracts/admin";
 import { sql } from "../db.ts";
 import { capabilities, capabilityAcceptsModel, fallbackModelFor, invalidateModelCache, modelSources } from "../editorial/models.ts";
+import { DECISION_STEPS } from "../editorial/decisions.ts";
+import { shadowModels } from "../editorial/shadow.ts";
 import { MODELS } from "../providers/llm.ts";
 import { modelCircuits } from "../providers/circuit.ts";
 import { audit } from "../audit.ts";
@@ -35,7 +37,7 @@ interface UsageRow {
   currency: string | null;
 }
 
-/** Calls, outcomes, latency, tokens and costs of a group of live attempts. */
+/** Calls, outcomes, latency, tokens and costs of a group of live attempts (chat usage, or a decision service's input/output). */
 const usageColumns = () => sql`
   count(*)::int AS calls,
   count(*) FILTER (WHERE a.status = 'received')::int AS ok,
@@ -43,9 +45,10 @@ const usageColumns = () => sql`
   count(*) FILTER (WHERE a.status = 'unknown')::int AS unknown,
   percentile_disc(0.5) WITHIN GROUP (ORDER BY a.latency_ms) AS p50,
   percentile_disc(0.95) WITHIN GROUP (ORDER BY a.latency_ms) AS p95,
-  sum((a.usage->>'prompt_tokens')::bigint) AS tokens_in, sum((a.usage->>'completion_tokens')::bigint) AS tokens_out,
-  sum((a.usage->>'prompt_tokens')::bigint) FILTER (WHERE a.cost IS NULL) AS tokens_in_uncosted,
-  sum((a.usage->>'completion_tokens')::bigint) FILTER (WHERE a.cost IS NULL) AS tokens_out_uncosted,
+  sum(coalesce(a.usage->>'prompt_tokens', a.usage->>'input_tokens')::bigint) AS tokens_in,
+  sum(coalesce(a.usage->>'completion_tokens', a.usage->>'output_tokens')::bigint) AS tokens_out,
+  sum(coalesce(a.usage->>'prompt_tokens', a.usage->>'input_tokens')::bigint) FILTER (WHERE a.cost IS NULL) AS tokens_in_uncosted,
+  sum(coalesce(a.usage->>'completion_tokens', a.usage->>'output_tokens')::bigint) FILTER (WHERE a.cost IS NULL) AS tokens_out_uncosted,
   sum(coalesce((a.usage->'prompt_tokens_details'->>'cached_tokens')::bigint, (a.usage->>'prompt_cache_hit_tokens')::bigint, 0)) FILTER (WHERE a.cost IS NULL) AS tokens_cached,
   count(*) FILTER (WHERE a.cost IS NULL AND a.status = 'received')::int AS uncosted,
   sum(a.cost) FILTER (WHERE a.cost_basis = 'actual') AS actual_cost,
@@ -55,8 +58,9 @@ const usageColumns = () => sql`
 export async function modelsOverview(days = 7): Promise<BeforeJson<AdminModels>> {
   const since = new Date(Date.now() - days * 86400_000);
   const stepPurposes = Object.values(capabilities()).flatMap((c) => c.purposes);
-  const [sources, circuits, usage, otherUsage, prices, history, benches] = await Promise.all([
+  const [sources, shadows, circuits, usage, otherUsage, prices, history, benches] = await Promise.all([
     modelSources(),
+    shadowModels(),
     modelCircuits(),
     sql<UsageRow[]>`
       SELECT a.service, r.purpose, a.model, r.request->>'promptVersion' AS prompt_version, ${usageColumns()}
@@ -71,7 +75,7 @@ export async function modelsOverview(days = 7): Promise<BeforeJson<AdminModels>>
     sql<{ service: string; model: string; currency: string; input_per_mtok: string | null; cached_per_mtok: string | null; output_per_mtok: string | null }[]>`
       SELECT service, model, currency, input_per_mtok, cached_per_mtok, output_per_mtok FROM service_prices`,
     sql<BeforeJson<AdminModels["history"][number]>[]>`
-      SELECT created_at AS at, actor, subject, reason, before, after FROM audit_log WHERE action = 'models.switch' ORDER BY created_at DESC LIMIT 30`,
+      SELECT created_at AS at, actor, subject, reason, before, after FROM audit_log WHERE action IN ('models.switch', 'models.shadow') ORDER BY created_at DESC LIMIT 30`,
     sql<{ id: string; label: string; sample_size: number; prompt_version: string | null; models: string[]; summary: unknown; created_at: Date }[]>`
       SELECT id, label, sample_size, prompt_version, models,
              (SELECT coalesce(jsonb_object_agg(key, value - 'sweep'), '{}'::jsonb) FROM jsonb_each(r.summary)) AS summary,
@@ -137,9 +141,11 @@ export async function modelsOverview(days = 7): Promise<BeforeJson<AdminModels>>
       fallback: backup ? { model: backup, primaryPaused: !!primaryCircuit?.openUntil, backupPaused: !!backupCircuit?.openUntil,
         nextProbeAt: primaryCircuit?.openUntil ? new Date(Math.max(primaryCircuit.openUntil, primaryCircuit.probeUntil)).toISOString() : null } : null,
       usage: usage.filter((u) => c.purposes.includes(u.purpose)).map((u) => ({ ...view(u), promptVersion: u.prompt_version })),
+      decisions: Object.hasOwn(DECISION_STEPS, key),
+      shadow: shadows[key as keyof typeof shadows] ?? null,
     };
   });
-  const choices = Object.values(MODELS).map((m) => ({ key: m.key, service: m.service, vision: !!m.vision }));
+  const choices = Object.values(MODELS).map((m) => ({ key: m.key, service: m.service, vision: !!m.vision, decision: m.api === "systemone" }));
   return { days, capabilities: steps, others, totals, choices, history, benches };
 }
 
@@ -151,6 +157,7 @@ export async function switchModel(capability: string, model: string | null, reas
   if (model !== null) {
     const spec = MODELS[model];
     if (!spec) throw Object.assign(new Error("unknown model"), { statusCode: 400 });
+    if (spec.api) throw Object.assign(new Error("a decision model only runs in shadow"), { statusCode: 400 });
     if (!capabilityAcceptsModel(c, spec)) throw Object.assign(new Error("this capability needs a vision model"), { statusCode: 400 });
   }
   const before = (await modelSources())[capability];
@@ -163,4 +170,24 @@ export async function switchModel(capability: string, model: string | null, reas
   const after = (await modelSources())[capability];
   await audit(actor, "models.switch", `capability:${capability}`, reason, before ?? null, after ?? null);
   return { capability, before, after };
+}
+
+/**
+ * Turns a decision model's shadow of a step on (or off when null): it answers beside the step on new
+ * judgements, for the comparison in scripts/eval-jev-shadow.ts, and decides nothing.
+ */
+export async function setShadow(capability: string, model: string | null, reason: string, actor: string) {
+  if (!Object.hasOwn(DECISION_STEPS, capability)) throw Object.assign(new Error("this step has no decision questions"), { statusCode: 400 });
+  if (!reason.trim()) throw Object.assign(new Error("a reason is required"), { statusCode: 400 });
+  if (model !== null && MODELS[model]?.api !== "systemone") throw Object.assign(new Error("not a decision model"), { statusCode: 400 });
+  const key = `shadow.${capability}`;
+  const before = (await shadowModels())[capability as keyof typeof DECISION_STEPS] ?? null;
+  if (model === null) await sql`DELETE FROM settings WHERE key = ${key}`;
+  else {
+    await sql`INSERT INTO settings (key, value, updated_by) VALUES (${key}, ${sql.json({ model })}, ${actor})
+              ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = now()`;
+  }
+  const shown = (m: string | null) => (m ? { model: m, source: "shadow" } : null);
+  await audit(actor, "models.shadow", `shadow:${capability}`, reason, shown(before), shown(model));
+  return { capability, before, after: model };
 }

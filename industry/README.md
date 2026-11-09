@@ -9,6 +9,7 @@
 | `sources.json` | 首次启动时导入的示范信源 |
 | `prompts/` | 每一步的提示词：预筛、评分、写作、结构化、归组、事件综述、周报月报、翻译 |
 | `selection.ts` | 入选门槛，以及评分五个维度按内容类型的权重 |
+| `decisions.ts` | 预筛和评分的标准改写成的判断题，只在试用 Jev 时用（[精选与校准](../docs/selection.md#试用-jev)） |
 | `gold.example.jsonl` | 精选评测样本的格式示例 |
 | `relation-gold.example.jsonl` | 事件关系评测样本的格式示例 |
 | `story-digest-eval.example.jsonl` | 事件综述评测案例的格式示例 |

@@ -409,12 +409,18 @@ export interface AdminModelUsage {
 
 export interface AdminModels {
   days: number;
-  capabilities: Array<{ key: string; label: string; env: string; defaultModel: string; vision: boolean; current: { model: string; source: "admin" | "env" | "default"; invalid?: string }; fallback: { model: string; primaryPaused: boolean; backupPaused: boolean; nextProbeAt: string | null } | null; usage: AdminModelUsage[] }>;
+  capabilities: Array<{
+    key: string; label: string; env: string; defaultModel: string; vision: boolean; current: { model: string; source: "admin" | "env" | "default"; invalid?: string };
+    fallback: { model: string; primaryPaused: boolean; backupPaused: boolean; nextProbeAt: string | null } | null; usage: AdminModelUsage[];
+    /** Whether a decision model can answer beside this step (shadow), and the one that does now. */
+    decisions: boolean; shadow: string | null;
+  }>;
   /** Paid requests outside the model steps: embeddings, page reading, X and WeChat lookups. */
   others: Array<Omit<AdminModelUsage, "promptVersion"> & { service: string }>;
   /** Every paid request of the window, per currency; `estimated` is the part not billed as such. */
   totals: { costs: Array<{ currency: string; actual: number; estimated: number }>; unpriced: number };
-  choices: Array<{ key: string; service: string; vision: boolean }>;
+  /** `decision`: a decision service (Jev), which only runs in shadow. */
+  choices: Array<{ key: string; service: string; vision: boolean; decision: boolean }>;
   history: Array<{ at: Timestamp; actor: string; subject: string; reason: string | null; before: { model: string; source: string } | null; after: { model: string; source: string } | null }>;
   benches: Array<{ id: string; label: string; sample_size: number; prompt_version: string | null; models: string[]; created_at: Timestamp }>;
 }

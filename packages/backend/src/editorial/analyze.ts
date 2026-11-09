@@ -83,7 +83,7 @@ const scoreCall = (model: string) => MODELS[model]?.scoreCall ?? { temperature: 
 /** The score prompt: the industry's taste (industry/prompts/selection-score.md). */
 export const SCORE_SYSTEM = promptText("selection-score");
 
-const AXES = ["sig", "nov", "cred", "reson", "act"] as const;
+export const AXES = ["sig", "nov", "cred", "reson", "act"] as const;
 const Axis = z.coerce.number().int().min(0).max(10);
 
 /** One score call's answer: the content type and the five axes of the rubric; the total is weighed here, not by the model. */
@@ -124,6 +124,11 @@ export function scoreInputTime(at: Date): string {
  * original title (items are scored before any Chinese copy exists) and the whole body.
  */
 export function buildScoreInput(a: AnalyzeInputArticle): string {
+  return ["请按系统规则评估以下单篇材料所代表的事件。只输出系统规则要求的 JSON。", scoreMaterial(a, MAX_BODY_CHARS)].join("\n\n");
+}
+
+/** The material the score judges: its publication time, title and body (the body cut at `maxChars`). */
+export function scoreMaterial(a: AnalyzeInputArticle, maxChars: number): string {
   let body: string;
   if (a.xPost) {
     const quoted = a.xPost.quoted?.text ? `\n\n[引用 ${a.xPost.quoted.handle ? `@${a.xPost.quoted.handle}` : "原推文"}]：${a.xPost.quoted.text}` : "";
@@ -134,10 +139,9 @@ export function buildScoreInput(a: AnalyzeInputArticle): string {
   if (!body) body = a.title;
   const at = a.publishedAt;
   return [
-    "请按系统规则评估以下单篇材料所代表的事件。只输出系统规则要求的 JSON。",
     `【发布时间（北京时间）】\n${at ? a.publicationTime === undefined || a.publicationTime?.includes("T") ? scoreInputTime(at) : describePublicationTime(at, a.publicationTime) : "未知（收录时间不代表发布时间）"}`,
     `【标题】\n${a.title.trim()}`,
-    `【完整正文】\n${body.length > MAX_BODY_CHARS ? body.slice(0, MAX_BODY_CHARS) : body}`,
+    `【完整正文】\n${body.length > maxChars ? body.slice(0, maxChars) : body}`,
   ].join("\n\n");
 }
 
@@ -263,7 +267,8 @@ type ReceiptObserver = (receiptId: number) => void;
 /** A stopping worker finishes the stage it is in, never starts the next. */
 const checkAnalysisRunning = () => shutdownSignal.signal.throwIfAborted();
 
-const subjectOf = (a: AnalyzeInputArticle) => `article:${a.id}@${a.revision}`;
+/** The receipt subject of an article revision, shared by every step that judges it. */
+export const subjectOf = (a: Pick<AnalyzeInputArticle, "id" | "revision">) => `article:${a.id}@${a.revision}`;
 const tagged = (attemptTag: string | undefined, step: string) => [attemptTag, step].filter(Boolean).join(":") || undefined;
 
 async function runPrefilter(a: AnalyzeInputArticle, opts: StepOpts): Promise<NonNullable<AnalysisRun["prefilter"]>> {

@@ -66,7 +66,14 @@ export default function ModelsAdmin({ loaderData: m }: Route.ComponentProps) {
   const { run, pending } = useAdminAction();
   const [target, setTarget] = useState<AdminModels["capabilities"][number] | null>(null);
   const [choice, setChoice] = useState<string>("");
-  const labelOf = (key: string) => m.capabilities.find((c) => `capability:${c.key}` === key)?.label ?? key;
+  const [shadowTarget, setShadowTarget] = useState<AdminModels["capabilities"][number] | null>(null);
+  const [shadowChoice, setShadowChoice] = useState<string>("");
+  const deciders = m.choices.filter((x) => x.decision);
+  const labelOf = (subject: string) => {
+    const [kind, key] = subject.split(":");
+    const label = m.capabilities.find((c) => c.key === key)?.label;
+    return !label ? subject : kind === "shadow" ? `影子运行：${label}` : label;
+  };
 
   return (
     <AdminPage
@@ -107,6 +114,7 @@ export default function ModelsAdmin({ loaderData: m }: Route.ComponentProps) {
                   <span className="font-mono text-[12px] font-normal text-ink-3 [overflow-wrap:anywhere]">{c.current.model}</span>
                   <Badge tone={c.current.source === "admin" ? "accent" : "muted"}>{SOURCE_LABEL[c.current.source]}</Badge>
                   {c.current.invalid && <Badge tone="bad">配置的 {c.current.invalid} 不存在，未生效</Badge>}
+                  {c.shadow && <Badge tone="muted" title="在这一步的新判断上另外回答一遍，只记回执，不决定结果">影子 {c.shadow}</Badge>}
                   {c.fallback && <span className="text-xs font-normal text-ink-3">
                     备用 {c.fallback.model} · {c.fallback.primaryPaused
                       ? c.fallback.backupPaused ? "主备均暂停，等待恢复" : "正在接续"
@@ -116,15 +124,28 @@ export default function ModelsAdmin({ loaderData: m }: Route.ComponentProps) {
                 </span>
               }
               right={
-                <Button
-                  size="sm"
-                  onClick={() => {
-                    setTarget(c);
-                    setChoice(c.current.model);
-                  }}
-                >
-                  切换
-                </Button>
+                <span className="inline-flex gap-2">
+                  {c.decisions && deciders.length > 0 && (
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        setShadowTarget(c);
+                        setShadowChoice(c.shadow ?? deciders[0]!.key);
+                      }}
+                    >
+                      影子运行
+                    </Button>
+                  )}
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      setTarget(c);
+                      setChoice(c.current.model);
+                    }}
+                  >
+                    切换
+                  </Button>
+                </span>
               }
               pad={false}
             >
@@ -180,7 +201,7 @@ export default function ModelsAdmin({ loaderData: m }: Route.ComponentProps) {
               ]}
             />
           ) : (
-            <Empty>还没有在后台切换过模型</Empty>
+            <Empty>还没有在后台切换过模型或影子运行</Empty>
           )}
         </Card>
         <Card title="同批样本对比（SelectBench）" right={<Link to="/admin/selectbench" className="text-accent">全部运行</Link>} pad={false}>
@@ -216,13 +237,36 @@ export default function ModelsAdmin({ loaderData: m }: Route.ComponentProps) {
         <Field label="模型">
           <Select value={choice} onChange={(e) => setChoice(e.target.value)}>
             {m.choices
-              .filter((x) => !target?.vision || x.vision)
+              .filter((x) => !x.decision && (!target?.vision || x.vision))
               .map((x) => (
                 <option key={x.key} value={x.key}>
                   {x.key}（{x.service}）
                 </option>
               ))}
             <option value="__default">恢复默认（{target?.env} 或 {target?.defaultModel}）</option>
+          </Select>
+        </Field>
+      </ReasonDialog>
+
+      <ReasonDialog
+        open={!!shadowTarget}
+        title={`影子运行：${shadowTarget?.label ?? ""}`}
+        description="判断题模型在这一步之后的新判断上另外回答一遍，每次调用都计费，只记回执，不改变任何结果。文章的标题和正文开头会发给这个服务。对比报告用 scripts/eval-jev-shadow.ts。"
+        confirmLabel="保存"
+        busy={pending === "shadow"}
+        onClose={() => setShadowTarget(null)}
+        onSubmit={async (reason) =>
+          (await run("POST", `/api/admin/model-shadow/${shadowTarget!.key}`, { model: shadowChoice === "__off" ? null : shadowChoice, reason }, { label: "shadow", success: shadowChoice === "__off" ? "已关闭影子运行" : "已打开，下一轮（5 分钟内）开始" })) !== null
+        }
+      >
+        <Field label="判断题模型">
+          <Select value={shadowChoice} onChange={(e) => setShadowChoice(e.target.value)}>
+            {deciders.map((x) => (
+              <option key={x.key} value={x.key}>
+                {x.key}（{x.service}）
+              </option>
+            ))}
+            <option value="__off">关闭</option>
           </Select>
         </Field>
       </ReasonDialog>
