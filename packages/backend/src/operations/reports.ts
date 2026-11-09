@@ -4,6 +4,7 @@ import { beijingDay } from "@aihot/contracts/time";
 import { sql } from "../db.ts";
 import { sendAlert } from "../notify/feishu.ts";
 import { serverModules } from "../modules.ts";
+import { SOURCE_STATS_DAYS, sourceStats, type SourceStats } from "../sources/stats.ts";
 import { useLabels } from "../sources/uses.ts";
 
 /** Sources that serve modules only (out of the news, with uses): counted and named apart from the news sources. */
@@ -51,9 +52,29 @@ async function sourceChanges(since: Date): Promise<string[]> {
   ];
 }
 
+/** How many sources the weekly report names by how often they were first to report. */
+const FIRST_REPORTERS = 5;
+
 /**
- * Monday 09:00: the week in a few lines, and what agents changed. Per-source lists stay out: nobody can act on
- * 160 quiet sources in a chat message; the Monday patrol checks them from sourceHealth(), the daily follow-ups name failures.
+ * The sources most often first with a fact others reported too, over sourceStats' 30 days: the evidence for a
+ * tier worth a look. The whole list is the admin source page's; the owner sets the tiers.
+ */
+async function firstReporters(now: number): Promise<string[]> {
+  const top = (await sourceStats(now)).filter((s) => s.enabled && s.first > 0)
+    .sort((a, b) => b.first - a.first || a.shared - b.shared || a.name.localeCompare(b.name)).slice(0, FIRST_REPORTERS);
+  if (!top.length) return [];
+  const rate = (s: SourceStats) => (s.items ? `${Math.round((s.selected / s.items) * 100)}%` : "—");
+  return [
+    `近 ${SOURCE_STATS_DAYS} 天最常首报的信源（和别家报道同一件事时最早发出 / 这样的事数）：`,
+    ...top.map((s) => `· ${s.name}（${s.tier.replace("_", ".")}）：首报 ${s.first}/${s.shared}，收录 ${n(s.items)}，精选率 ${rate(s)}`),
+    "全部信源的这几项在后台信源页，分级由你定。",
+  ];
+}
+
+/**
+ * Monday 09:00: the week in a few lines, what agents changed and the few sources most often first to report.
+ * Per-source lists stay out otherwise: nobody can act on 160 quiet sources in a chat message; the Monday patrol
+ * checks them from sourceHealth(), the daily follow-ups name failures.
  */
 export async function sourceHealthWeekly(now = Date.now()) {
   const since = new Date(now - 7 * 86400_000);
@@ -86,6 +107,8 @@ export async function sourceHealthWeekly(now = Date.now()) {
   for (const m of serverModules()) if (m.sourceHealth) lines.push(...(await m.sourceHealth(now)));
   const changes = await sourceChanges(since);
   if (changes.length) lines.push("", ...changes);
+  const first = await firstReporters(now);
+  if (first.length) lines.push("", ...first);
   await sendAlert("📊 信源周报", lines);
   return { failing: counts!.failing };
 }

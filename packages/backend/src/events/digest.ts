@@ -6,6 +6,7 @@ import { beijingDate, beijingTime } from "@aihot/contracts/time";
 import { sql } from "../db.ts";
 import { chatJson } from "../providers/llm.ts";
 import { completeReceipt } from "../providers/receipts.ts";
+import { firstReleases } from "../publication/representative.ts";
 import { digestFactEvidence, digestInputsHash, digestReports, type DigestReport } from "../publication/story-evidence.ts";
 import { promptText, promptVersion } from "../editorial/prompts.ts";
 
@@ -24,16 +25,26 @@ export const DIGEST_SAMPLING = { temperature: 0.3, maxTokens: 1200 };
 /** Oldest first; reports from the same moment keep the order digestReports returned them in. */
 export const byReportTime = (a: { at: Date }, b: { at: Date }) => a.at.getTime() - b.at.getTime();
 
+/** The most reports one digest request reads: every fact's 首发, then the latest of the others. */
+const DIGEST_MAX_REPORTS = 40;
+
 /**
- * The digest request's input, from one story's reports in byReportTime order. The evaluation
+ * The digest request's input, from one story's reports in byReportTime order. Each fact's 首发 (publication/
+ * representative.ts firstReleases) is listed first, so the digest attributes the fact to it before the
+ * reports that relay it; a story without one reads by time alone, as before. The evaluation
  * (scripts/eval-story-digests.ts) sends this, the system prompt and the sampling above as they are.
  */
 export function buildStoryDigestInput(story: { title: string; digest: string | null }, reports: Omit<DigestReport, "story_id">[], opts: { corrected: boolean; knownArticleIds?: string[] }) {
   const known = new Set(opts.knownArticleIds ?? []);
-  const lines = reports.slice(-40).map((r) => `${opts.corrected || known.has(r.id) ? "" : "【新】"}报道 ${r.id}｜事实 ${r.fact_id}｜${beijingDate(r.at)} ${beijingTime(r.at)}｜${r.source_name}${r.first_party ? "（一手）" : ""}｜${r.title}｜${r.summary ?? ""}\n事实条件与来源证据：${JSON.stringify(digestFactEvidence(r))}`);
+  const firsts = firstReleases(reports);
+  const lead = reports.filter((r) => firsts.has(r.id)).slice(-DIGEST_MAX_REPORTS);
+  const rest = reports.filter((r) => !firsts.has(r.id));
+  const listed = [...lead, ...rest.slice(Math.max(0, rest.length - (DIGEST_MAX_REPORTS - lead.length)))];
+  const lines = listed.map((r) => `${opts.corrected || known.has(r.id) ? "" : "【新】"}${firsts.has(r.id) ? "【首发】" : ""}报道 ${r.id}｜事实 ${r.fact_id}｜${beijingDate(r.at)} ${beijingTime(r.at)}｜${r.source_name}${r.first_party ? "（一手）" : ""}｜${r.title}｜${r.summary ?? ""}\n事实条件与来源证据：${JSON.stringify(digestFactEvidence(r))}`);
+  const order = lead.length ? "标【首发】的是官方或当事方自己的账号对所属事实最早的发布，排在最前，写到这个事实时先归于它；其余按时间" : "按时间";
   return opts.corrected
-    ? `事件当前标题：${story.title}\n\n报道内容或事实证据经过更正。请只依据下面这些报道的当前内容重写综述，不要沿用以前版本的说法。\n报道（按时间）：\n${lines.join("\n")}`
-    : `事件当前标题：${story.title}\n${story.digest ? `上一版综述：${story.digest}\n` : ""}\n报道（按时间，标【新】的是上一版之后的新报道）：\n${lines.join("\n")}`;
+    ? `事件当前标题：${story.title}\n\n报道内容或事实证据经过更正。请只依据下面这些报道的当前内容重写综述，不要沿用以前版本的说法。\n报道（${order}）：\n${lines.join("\n")}`
+    : `事件当前标题：${story.title}\n${story.digest ? `上一版综述：${story.digest}\n` : ""}\n报道（${order}，标【新】的是上一版之后的新报道）：\n${lines.join("\n")}`;
 }
 
 /**

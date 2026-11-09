@@ -93,6 +93,11 @@ function RailCard({ title, right, children, className = "" }: { title: ReactNode
   );
 }
 
+/** 首发: the earliest report of its development from an official source or the subject's own account. */
+function FirstReleaseBadge() {
+  return <Badge tone="accent" title="官方或当事方账号对这件事最早的发布">首发</Badge>;
+}
+
 /** One report on the story timeline: time, source and marks, title, a summary that opens on demand. */
 function TimelineRow({ r }: { r: StoryReportView }) {
   const [open, setOpen] = useState(false);
@@ -110,6 +115,7 @@ function TimelineRow({ r }: { r: StoryReportView }) {
       <div className="min-w-0">
         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[12px] leading-[20px] text-ink-4 lg:mt-0">
           <span className="min-w-0 truncate">{r.source.name}</span>
+          {r.firstRelease && <FirstReleaseBadge />}
           {r.selected && <SelectedBadge />}
         </div>
         <IntentLink viewTransition to={`/items/${r.id}`} className="mt-1 block text-[16px] font-[650] leading-[1.6] text-ink transition-colors hover:text-accent lg:text-[15.5px]">
@@ -202,6 +208,7 @@ export default function StoryPage() {
         <div className="flex items-center gap-2 text-[12px] text-ink-4">
           热点事件
           <Badge tone={status.tone}>{status.label}</Badge>
+          {story.singleSource && <Badge title="只有一个来源在报道，也没有官方或当事方的发布">单一来源</Badge>}
         </div>
         <h1 data-page-title="" className="mt-2.5 text-[27px] font-bold leading-[1.5] tracking-[-0.01em] text-ink lg:mt-3 lg:text-[36px] lg:font-[730]">{story.title}</h1>
         <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1 text-[12.5px] text-ink-3">
@@ -401,7 +408,10 @@ export default function StoryPage() {
               <ul className="mt-1 divide-y divide-line-soft">
                 {story.officialReports.slice(0, 5).map((r) => (
                   <li key={r.id} className="py-3">
-                    <div className="truncate text-[11.5px] text-ink-4">{r.source.name}</div>
+                    <div className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-ink-4">
+                      <span className="min-w-0 truncate">{r.source.name}</span>
+                      {r.firstRelease && <FirstReleaseBadge />}
+                    </div>
                     <Link viewTransition to={`/items/${r.id}`} className="group mt-1 block text-[13.5px] font-semibold leading-[1.6] text-ink transition-colors hover:text-accent">
                       {r.title}
                       <IconChevronRight size={13} className="ml-0.5 inline -translate-y-px text-ink-4 transition-transform group-hover:translate-x-0.5" />

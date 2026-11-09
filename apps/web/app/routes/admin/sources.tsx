@@ -31,7 +31,7 @@ export default function Sources({ loaderData }: Route.ComponentProps) {
   return (
     <AdminPage
       title="信源"
-      subtitle="列表按健康度排序：失败的在最前。点进详情可以预览抓取、手动采集、调整频率与参与方式。"
+      subtitle="列表按健康度排序：失败的在最前。点进详情可以预览抓取、手动采集、调整频率与参与方式。30 天首报：它报道的事有别家也报道时，它最早发出的次数 / 这样的事数；和精选率一起作定分级的参考，分级不会自动改。"
       actions={<ButtonLink to="/admin/sources/new" tone="primary">新建信源</ButtonLink>}
     >
       <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-4">
@@ -110,7 +110,19 @@ export default function Sources({ loaderData }: Route.ComponentProps) {
             { key: "ok", label: "上次成功", render: (r) => <Time at={r.last_ok_at} /> },
             { key: "interval", label: "频率", align: "right", render: (r) => `${r.interval_minutes} 分` },
             { key: "items", label: "7 天条目", align: "right", render: (r) => num(r.items_7d) },
-            { key: "sel", label: "30 天精选", align: "right", render: (r) => num(r.selected_30d) },
+            { key: "items30", label: "30 天条目", align: "right", render: (r) => num(r.items_30d) },
+            {
+              key: "sel",
+              label: "30 天精选",
+              align: "right",
+              render: (r) => (
+                <span className="whitespace-nowrap">
+                  {num(r.selected_30d)}
+                  {r.items_30d > 0 && <span className="ml-1 text-[11.5px] text-ink-4">{num((r.selected_30d / r.items_30d) * 100, r.selected_30d / r.items_30d < 0.1 ? 1 : 0)}%</span>}
+                </span>
+              ),
+            },
+            { key: "first", label: "30 天首报", align: "right", render: (r) => (r.shared_30d ? `${num(r.first_30d)}/${num(r.shared_30d)}` : "—") },
           ]}
         />
       </Card>

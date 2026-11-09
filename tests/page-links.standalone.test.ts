@@ -25,7 +25,7 @@ const items: SiteItemDetail[] = [
 // A minute ago: this year's, unless the test runs in the first minute of one.
 const recent = new Date(Date.now() - 60_000).toISOString();
 const story = (publicId: string, firstReportAt: string | null): StoryDetail => ({
-  publicId, title: "测试事件", status: "settled", reportCount: 61, sourceCount: 20, firstReportAt, latestAt: firstReportAt ?? FIXTURE_AT, digest: null, digestUpdatedAt: null,
+  publicId, title: "测试事件", status: "settled", reportCount: 61, sourceCount: 20, singleSource: false, firstReportAt, latestAt: firstReportAt ?? FIXTURE_AT, digest: null, digestUpdatedAt: null,
   summary: null, excerpt: null, latest: null, latestReport: null,
   whyHot: { participants48h: 0, newParticipants6h: 0, recentReports24h: 0, observationComplete: true, rank: null },
   developments: [], officialReports: [], timeline: [], heat: [], related: [], topics: [], mentions: [],

@@ -117,7 +117,14 @@ export interface AdminSourceRow {
   first_party: boolean;
   next_fetch_at: Timestamp | null;
   items_7d: number;
+  /** The last 30 days (sources/stats.ts), evidence for the tier the owner sets; nothing changes a tier from them. */
+  items_30d: number;
+  /** Selected and not withdrawn. */
   selected_30d: number;
+  /** Facts it reported that another source reported too. */
+  shared_30d: number;
+  /** Of those, the facts its report was the first of. */
+  first_30d: number;
 }
 
 export interface AdminSources {

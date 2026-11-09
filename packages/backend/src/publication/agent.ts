@@ -133,17 +133,22 @@ export function storyAnswer(s: Story, limit: number, via: Via): string {
     "",
     ...(s.digest ? [`事件综述：${s.digest}`, ""] : []),
     "报道时间线（从新到旧）：",
-    ...reports.map((r, i) => `${i + 1}. ${stamp(r.publishedAt)} · ${publicSourceName(r.source.name)}${r.source.firstParty ? "（一手）" : ""} · [${linkText(r.title)}](${r.links.aihot})`),
+    ...reports.map((r, i) => {
+      const marks = [r.source.firstParty && "一手", r.firstRelease && "首发"].filter(Boolean);
+      return `${i + 1}. ${stamp(r.publishedAt)} · ${publicSourceName(r.source.name)}${marks.length ? `（${marks.join("，")}）` : ""} · [${linkText(r.title)}](${r.links.aihot})`;
+    }),
     ...(neighbours.length ? ["", "相关事件：", ...neighbours.map((n) => `- ${n.title}：${via === "http" ? agentUrl(`/stories/${n.publicId}`) : `public_id=${n.publicId}`}`)] : []),
   ];
   return answer([
     `# ${SITE.name} 事件：${s.title}`,
     "",
-    `${s.status === "active" ? "持续更新" : "历史事件"} · ${s.reportCount} 篇报道 · ${s.sourceCount} 个信源 · 首次报道 ${stamp(s.firstReportAt)}（北京时间）`,
+    `${s.status === "active" ? "持续更新" : "历史事件"} · ${s.reportCount} 篇报道 · ${s.sourceCount} 个信源${s.singleSource ? " · 单一来源" : ""} · 首次报道 ${stamp(s.firstReportAt)}（北京时间）`,
     `事件页：${s.links.aihot}`,
   ], data, [
     "先讲最新进展，再按时间讲清来龙去脉；综述里点明的矛盾或未证实之处要照实说。",
     "标「一手」的是当事公司或本人的发布，引用时优先用它们。",
+    ...(reports.some((r) => r.firstRelease) ? ["标「首发」的是官方或当事方账号对这件事最早的那篇，讲出处时先提它。"] : []),
+    ...(s.singleSource ? ["这件事只有一个来源在报道，也没有官方或当事方的发布：转述时说明消息只来自这一家。"] : []),
     ...(s.reportCount > reports.length ? [`时间线只列了最新 ${reports.length} 篇，共 ${s.reportCount} 篇；${via === "http" ? "要看更多加 limit（最多 50）" : "要看更多调大 report_limit（最多 50）"}。`] : []),
     NO_INTERNALS,
   ]);
