@@ -445,3 +445,24 @@ test("sources only a module uses are counted and named on their own, apart from 
   assert.match(text, /另有只给模块用的信源 2 个（盯梢 2），抓取失败 1 个/);
   assert.match(text, new RegExp(`· ${paused}（AI，[^，）]+，只给盯梢用）：账号设为私密`));
 });
+
+test("the weekly report shows how the week's 精选 and dailies spread over their sources", async () => {
+  const at = new Date(now - 86400_000);
+  const pick = async (sourceId: string, i: number) => {
+    const id = `${sourceId}-pick-${i}`;
+    await sql`INSERT INTO articles(id,source_id,identity_key,url,title,discovered_at,timeline_at)
+      VALUES(${id},${sourceId},${`url:${id}`},${`https://example.test/${id}`},${id},${at},${at})`;
+    await sql`INSERT INTO publications(article_id,source_id,title,eligible,selected,visibility,discovered_at,timeline_at,sort_at,url,channel)
+      VALUES(${id},${sourceId},${id},true,true,'public',${at},${at},${at},${`https://example.test/${id}`},'news')`;
+  };
+  const [a, b, c, d] = [await source("spread-a"), await source("spread-b"), await source("spread-c"), await source("spread-d")];
+  for (const [sourceId, picks] of [[a, 3], [b, 1], [c, 1], [d, 1]] as const) for (let i = 0; i < picks; i++) await pick(sourceId, i);
+  const entry = (sourceId: string) => ({ itemId: `${sourceId}-pick-0`, sourceId });
+  const content = { sections: [{ label: "行业", items: [entry(a), entry(a), entry(b)] }], flashes: [entry(c)] };
+  await sql`INSERT INTO reports(kind,key,window_start,window_end,content,generated_at)
+    VALUES('daily',${at.toISOString().slice(0, 10)},${new Date(+at - 86400_000)},${at},${sql.json(content)},${at})`;
+  const text = await weekly();
+  // Six picks, half of them from one source; four daily entries from three sources.
+  assert.match(text, /本周精选来自 4 个信源，前三个占 83%，均匀度 0\.90/);
+  assert.match(text, /本周 1 期日报的 4 条（含快讯）来自 3 个信源，前三个占 100%，均匀度 0\.95/);
+});
