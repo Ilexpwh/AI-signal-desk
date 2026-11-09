@@ -253,11 +253,11 @@ export default function StoryPage() {
             {overview ? (
               <>
                 <p className="whitespace-pre-line text-[15px] leading-[1.85] text-ink-2"><MentionText runs={overviewRuns} /></p>
-                {overview.note && (
-                  <p className="mt-2 text-[12px] text-ink-4" suppressHydrationWarning>
-                    {overview.note}
-                  </p>
-                )}
+                {/* A wrong overview or a report that belongs to another story, reported with this page. */}
+                <p className="mt-2 text-[12px] text-ink-4" suppressHydrationWarning>
+                  {overview.note && <>{overview.note} · </>}
+                  <Link viewTransition to={`/feedback?from=${encodeURIComponent(`/story/${story.publicId}`)}`} className="hover:text-accent">报错</Link>
+                </p>
               </>
             ) : (
               <p className="text-[13.5px] text-ink-4">还没有综述，先看下面的报道时间线。</p>
