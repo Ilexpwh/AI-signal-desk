@@ -14,6 +14,8 @@ import {
   type ScoreAxes,
 } from "@aihot/backend/editorial/analyze";
 import { createSource, updateSource } from "@aihot/backend/admin/sources";
+import { commitCopy, copyText, findOriginal, fingerprint } from "@aihot/backend/editorial/copies";
+import { publishArticle } from "@aihot/backend/publication/publish";
 import { processArticle, queueProcessing } from "@aihot/backend/jobs/content";
 import { QUEUES, stopBoss } from "@aihot/backend/jobs/queue";
 import { compactAnswerFirstSummary, enforceIdentity, MAX_BODY_CHARS, parseTranslateOutput } from "@aihot/backend/editorial/writing";
@@ -340,10 +342,11 @@ test("analysing the same revision again reuses every paid answer", async () => {
   assert.deepEqual([again!.reused, again!.receiptIds], [true, first!.receiptIds]);
 });
 
-// Reprints (editorial/copies.ts). Each original has a text of its own, so no case finds another's; its
-// reprint differs only in what the fingerprint leaves out (spacing, a link).
+// Reprints (editorial/copies.ts). Each original has a text of its own: random words, without LONG, whose
+// eight repeats outweigh anything beside them and bring every other fixture article within a few bits. So
+// no case finds another's original; its reprint differs only in what the fingerprint leaves out (spacing, a link).
 const words = () => Array.from({ length: 40 }, () => Math.random().toString(36).slice(2, 8)).join(" ");
-async function original(marker: "REPRINT" | "UNWANTED", sourceId = SOURCE, bodyText = `${marker}: ${words()} ${LONG}`) {
+async function original(marker: "REPRINT" | "UNWANTED", sourceId = SOURCE, bodyText = `${marker}: ${words()} ${words()}`) {
   const title = `${marker} model release ${tag()}`;
   const id = await article(marker, { sourceId, url: `https://example.com/original-${tag()}`, title, bodyText });
   await analyzeArticle(id);
@@ -413,4 +416,23 @@ test("only a source held to the same line or a higher one copies; the same sourc
   const short = await original("REPRINT", SOURCE, `REPRINT: ${words().slice(0, 100)}`);
   await grouped(short.id);
   assert.ok(await judgedInFull(await reprint(short)), "too short to tell a reprint from a coincidence");
+});
+
+test("an original an editor withdraws or corrects after it was found is not copied: the reprint is judged in full", async () => {
+  for (const moderate of [
+    async (id: string) => { await publishArticle(id); await sql`UPDATE publications SET visibility = 'withdrawn' WHERE article_id = ${id}`; },
+    (id: string) => sql`INSERT INTO editorial_overrides (article_id, fields, reason, version, updated_by) VALUES (${id}, '{"title":"更正"}', '更正', 1, 'test')`,
+  ]) {
+    const o = await original("REPRINT");
+    await grouped(o.id);
+    const copy = await reprint(o);
+    const input = (await loadAnalyzeInput(copy))!;
+    const h = fingerprint(copyText(input))!;
+    const found = (await findOriginal(h, input))!;
+    assert.equal(found.id, o.id);
+    await moderate(o.id);
+    assert.equal(await commitCopy(input, found, h), null);
+    assert.equal((await sql`SELECT 1 FROM analyses WHERE article_id = ${copy}`).length, 0, "nothing of the original's judgement is written");
+    assert.ok(await judgedInFull(copy));
+  }
 });

@@ -671,8 +671,8 @@ test("a copy joins its original's fact and heat without a judgement, and follows
   assert.deepEqual(signals.map((s) => [Number(s.story_id), s.source_id]), [[story, REPRINTER]], "the reprinting source counts for heat");
   const [state] = await sql`SELECT grouping_status, selection_adds_value FROM articles WHERE id = ${copy}`;
   assert.deepEqual({ ...state }, { grouping_status: "complete", selection_adds_value: false });
-  const [p] = await sql<{ fact_id: number; story_id: number; eligible: boolean }[]>`SELECT fact_id, story_id, eligible FROM publications WHERE article_id = ${copy}`;
-  assert.deepEqual([Number(p!.fact_id), Number(p!.story_id), p!.eligible], [fact, story, false], "evidence for its fact, never listed itself");
+  const [p] = await sql<{ fact_id: number; story_id: number; eligible: boolean; copy_coverage: boolean }[]>`SELECT fact_id, story_id, eligible, copy_coverage FROM publications WHERE article_id = ${copy}`;
+  assert.deepEqual([Number(p!.fact_id), Number(p!.story_id), p!.eligible, p!.copy_coverage], [fact, story, false, true], "evidence for its fact, never listed itself");
 
   const moved = await newFact();
   await sql`UPDATE fact_articles SET fact_id = ${moved.fact} WHERE article_id = ${original}`;

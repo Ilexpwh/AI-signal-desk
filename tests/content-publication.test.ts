@@ -21,6 +21,7 @@ import { storyTexts } from "@aihot/backend/publication/story-text";
 import { factSources } from "@aihot/backend/publication/coverage";
 import { loadPool } from "@aihot/backend/publication/pool";
 import { digestReports } from "@aihot/backend/publication/story-evidence";
+import { publishArticle } from "@aihot/backend/publication/publish";
 
 const key = `evidence-${tag()}`;
 const now = new Date();
@@ -160,8 +161,9 @@ test("a copy counts toward its fact's coverage everywhere it is counted, and is 
   const main = await report(s, g, { title: "原文报道", hours: 3 });
   const copy = await report(other, g, { title: "转载报道", hours: 2, selected: false });
   const own = `${key}-copy`;
-  await sql`UPDATE publications SET tags = ${[own]}, eligible = (article_id <> ${copy}) WHERE article_id IN ${sql([main, copy])}`;
-  await sql`UPDATE analyses SET output = output || jsonb_build_object('copyOf', ${main}::text) WHERE article_id = ${copy}`;
+  await sql`UPDATE publications SET tags = ${[own]} WHERE article_id = ${main}`;
+  await sql`UPDATE analyses SET tags = ${[own]}, output = output || jsonb_build_object('copyOf', ${main}::text) WHERE article_id = ${copy}`;
+  await publishArticle(copy);
 
   const detail = await loadItemDetail(main, "zh", now);
   assert.ok(detail.kind === "found");
@@ -180,6 +182,29 @@ test("a copy counts toward its fact's coverage everywhere it is counted, and is 
   const after = await loadItemDetail(main, "zh", now);
   assert.ok(after.kind === "found");
   assert.equal(after.item.group!.reportCount, 1);
+});
+
+// Coverage leaves out only what keeps a copy out of lists: what would keep its material out (a block,
+// a source no longer editorial) keeps it out of the count too.
+test("a copy its own judgement or source would not list is no coverage either", async () => {
+  const s = await source("copy-scope-original", "T1");
+  const other = await source("copy-scope-reprint", "T2");
+  const g = await story();
+  const main = await report(s, g, { title: "原文报道", hours: 3 });
+  const copy = await report(other, g, { title: "转载报道", hours: 2, selected: false });
+  await sql`UPDATE analyses SET output = output || jsonb_build_object('copyOf', ${main}::text) WHERE article_id = ${copy}`;
+  const counted = async () => {
+    await publishArticle(copy);
+    const detail = await loadItemDetail(main, "zh", now);
+    assert.ok(detail.kind === "found");
+    return [(await factSources([g.factId], now)).get(g.factId)?.length, detail.item.group!.reportCount];
+  };
+  assert.deepEqual(await counted(), [2, 2]);
+  await sql`UPDATE analyses SET relevance = 'block' WHERE article_id = ${copy}`;
+  assert.deepEqual(await counted(), [1, 1], "a blocked copy");
+  await sql`UPDATE analyses SET relevance = 'pass' WHERE article_id = ${copy}`;
+  await sql`UPDATE sources SET participation_mode = 'hot_signal' WHERE id = ${other}`;
+  assert.deepEqual(await counted(), [1, 1], "a copy from a source that only signals heat");
 });
 
 // A newer archive report may remain readable without qualifying as news. It cannot become the

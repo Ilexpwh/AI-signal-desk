@@ -69,14 +69,9 @@ export function latestCompositeCondition(article: ReturnType<typeof sql>) {
 }
 
 /**
- * The report was published from a copy's analysis (editorial/copies.ts): it repeats an original that
- * holds the fact's place in lists, and is counted only as coverage.
+ * The latest analysis of report `article` took an original's judgement (editorial/copies.ts): for grouping
+ * and the admin's re-evaluation, as latestCompositeCondition.
  */
-export function copyCondition() {
-  return sql`EXISTS (SELECT 1 FROM analyses copy_an WHERE copy_an.id = p.analysis_id AND copy_an.output->>'copyOf' IS NOT NULL)`;
-}
-
-/** The same rule over the latest analysis of report `article`, for grouping, as latestCompositeCondition. */
 export function latestCopyCondition(article: ReturnType<typeof sql>) {
   return sql`(SELECT copy_analysis.output->>'copyOf' IS NOT NULL FROM analyses copy_analysis
     WHERE copy_analysis.article_id = ${article}
@@ -102,10 +97,11 @@ export function evidenceCondition() {
 
 /**
  * Report `p` counts toward how widely its fact was reported at `now` ("另外 N 家也报道了", the daily's
- * source count): evidence that is listed, or a public copy, which lists no card of its own.
+ * source count): evidence that listedCondition lists, or that it would list but for being a copy
+ * (publish.ts copy_coverage), which lists no card of its own.
  */
 export function coverageCondition(now: Date) {
-  return sql`${evidenceCondition()} AND (${listedCondition(now)} OR (p.visibility = 'public' AND ${copyCondition()}))`;
+  return sql`${evidenceCondition()} AND p.visibility = 'public' AND (p.eligible OR p.copy_coverage) AND ${releasedCondition(now)}`;
 }
 
 /**

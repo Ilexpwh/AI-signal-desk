@@ -1,11 +1,12 @@
 // Reprints. Material that repeats an article another source already had judged is that article's copy:
 // before any paid step (jobs/content.ts) it takes the original's judgement without a model call, joins
 // the original's fact as one more report (events/group.ts) and stays out of the pool and the selection
-// (publication/rules.ts), while it still counts as coverage and heat. A copy is told by a 64-bit SimHash
+// (publication/publish.ts), while it still counts as coverage and heat. A copy is told by a 64-bit SimHash
 // of its text (articles.simhash, written with every judgement) within COPY_MAX_DISTANCE bits of the
 // original's. Both numbers are starting values: a site sets them from pairs it labels
-// (scripts/eval-copies.ts, docs/selection.md). An explicit re-evaluation always judges in full.
-import { sql } from "../db.ts";
+// (scripts/eval-copies.ts, docs/selection.md). An explicit re-evaluation always judges in full,
+// and so does a withdrawal or correction of the original for its copies (admin/content.ts).
+import { sql, type Db } from "../db.ts";
 import { RECALL_DAYS } from "../events/recall.ts";
 import { isIndependentSelectedSource } from "../publication/rules.ts";
 import { selectionThreshold, waitsForPage } from "./analyze.ts";
@@ -108,10 +109,19 @@ export interface CopyResult { analysisId: number; stale: boolean; relevance: "pa
  * The original's judgement committed as the copy's: a rule analysis with its relevance, copy, category,
  * tags and structure, never selected, its output naming the original (copyOf) and how far the
  * fingerprints lie apart. As with analyzeArticle, a result for an older revision is kept without
- * overwriting the newer one (stale).
+ * overwriting the newer one (stale). Null when an editor has withdrawn or corrected the original since it
+ * was found: that judgement is no longer the site's, and the copy is judged in full.
  */
-export async function commitCopy(a: AnalyzeInputArticle, original: Original, h: string): Promise<CopyResult> {
+export async function commitCopy(a: AnalyzeInputArticle, original: Original, h: string): Promise<CopyResult | null> {
   return sql.begin(async (tx) => {
+    // A withdrawal or correction locks the original before it sends the original's copies back to be
+    // judged (admin/content.ts). Locked first, in the same order, either that finds this copy or this
+    // sees it, read after the lock.
+    await tx`SELECT 1 FROM articles WHERE id = ${original.id} FOR KEY SHARE`;
+    const [moderated] = await tx`
+      SELECT 1 WHERE EXISTS (SELECT 1 FROM publications p WHERE p.article_id = ${original.id} AND p.visibility = 'withdrawn')
+        OR EXISTS (SELECT 1 FROM editorial_overrides e WHERE e.article_id = ${original.id})`;
+    if (moderated) return null;
     const [current] = await tx<{ revision: number }[]>`SELECT revision FROM articles WHERE id = ${a.id} FOR UPDATE`;
     const stale = !current || current.revision !== a.revision;
     const [row] = await tx<{ id: number; relevance: "pass" | "block" }[]>`
@@ -128,7 +138,8 @@ export async function commitCopy(a: AnalyzeInputArticle, original: Original, h: 
 }
 
 /**
- * The copy check, before any paid step. Null: the article repeats no original and is judged in full.
+ * The copy check, before any paid step. Null: the article repeats no original it may copy, or the one it
+ * repeats was withdrawn or corrected meanwhile, and is judged in full.
  * `waiting`: it repeats a passed original whose grouping is still pending, and waits for it, so that it
  * joins the fact the original gets.
  */
@@ -141,5 +152,19 @@ export async function judgeAsCopy(articleId: string): Promise<({ waiting: false 
   const original = await findOriginal(h, a);
   if (!original) return null;
   if (original.relevance === "pass" && original.groupingStatus === "pending") return { waiting: true };
-  return { waiting: false, ...(await commitCopy(a, original, h)) };
+  const committed = await commitCopy(a, original, h);
+  return committed && { waiting: false, ...committed };
+}
+
+/**
+ * The reprints whose current judgement is `originalId`'s, first discovered first: what the original's
+ * page lists, and what goes back to be judged when an editor withdraws or corrects it.
+ */
+export function copiesOf(db: Db, originalId: string) {
+  return db<{ id: string; title: string; source_name: string; distance: number; discovered_at: Date }[]>`
+    SELECT c.id, coalesce(p.title, c.title) AS title, s.name AS source_name, (cx.output->>'distance')::int AS distance, c.discovered_at
+    FROM analyses cx JOIN articles c ON c.id = cx.article_id JOIN sources s ON s.id = c.source_id LEFT JOIN publications p ON p.article_id = c.id
+    WHERE cx.output->>'copyOf' = ${originalId}
+      AND cx.id = (SELECT x.id FROM analyses x WHERE x.article_id = c.id ORDER BY x.input_revision DESC, x.id DESC LIMIT 1)
+    ORDER BY c.discovered_at, c.id`;
 }
