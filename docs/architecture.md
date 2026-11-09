@@ -50,7 +50,7 @@ flowchart LR
 | `packages/backend/src/events/` | 事件归组、热度、事件综述、主题趋势（`trends.ts`） |
 | `packages/backend/src/publication/` | 公开读取层 |
 | `packages/backend/src/reports/` | 日报、周报、月报 |
-| `packages/backend/src/providers/` | 模型、向量、X、公众号、Jina 的调用，回执与预算 |
+| `packages/backend/src/providers/` | 模型、向量、X、公众号、Jina 和自建浏览器渲染的调用，回执与预算 |
 | `packages/backend/src/notify/` | 飞书推送 |
 | `packages/backend/src/operations/` | 告警、备份、清理、IndexNow、百度推送 |
 | `packages/backend/src/admin/` | 后台接口 |
