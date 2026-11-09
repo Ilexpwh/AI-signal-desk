@@ -13,6 +13,7 @@ import { dajialaConfigured } from "@aihot/backend/providers/dajiala";
 import { refreshSourceIcons } from "@aihot/backend/sources/icons";
 import { computeHotRanking, snapshotHeat } from "@aihot/backend/events/hot";
 import { linkRelatedStories } from "@aihot/backend/events/consolidate";
+import { computeTopicTrends } from "@aihot/backend/events/trends";
 import { composeDueReports } from "@aihot/backend/reports/compose";
 import { dailyRetention } from "@aihot/backend/operations/retention";
 import { submitIndexNow } from "@aihot/backend/operations/indexnow";
@@ -34,6 +35,8 @@ const ENGINE_SCHEDULES: Scheduled[] = [
   { name: "hot.rank", cron: "*/5 * * * *", run: () => computeHotRanking() },
   { name: "hot.snapshot", cron: "2 * * * *", run: () => snapshotHeat() },
   { name: "stories.links", cron: "12 * * * *", run: linkRelatedStories },
+  // Each topic's stories per Beijing day against its usual share (上升中), the last week's days again.
+  { name: "topics.trend", cron: "20 0 * * *", missed: "once", run: () => computeTopicTrends() },
   // Every issue that is due and not written yet, each from its edition time (site/site.ts EDITION_TIMES)
   // at the next half hour; a missed or failed one at the next run.
   { name: "reports.compose", cron: "0,30 * * * *", missed: "once", run: () => composeDueReports() },

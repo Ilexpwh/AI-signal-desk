@@ -369,6 +369,8 @@ export interface ReportDetail {
   next: string | null;
   /** The pages its paragraphs and summaries name (mentions.ts). */
   mentions: MentionTarget[];
+  /** A weekly's topics that broke out during its week, each on its strongest day, strongest first; absent on other issues. */
+  rising?: Array<TopicLink & TopicRising>;
 }
 
 export interface ReportIndexEntry {
@@ -489,6 +491,16 @@ export interface Brand {
   fill?: boolean;
 }
 
+/** A topic breaking out on a day (上升中): that day's trend (topic_trends) met industry/taxonomy.ts TOPIC_RISING. */
+export interface TopicRising {
+  /** The Beijing day. */
+  day: string;
+  /** Stories editorial sources reported about the topic that day. */
+  stories: number;
+  /** Their share of all that day's stories against the topic's mean share over the 28 days before, to one decimal. */
+  ratio: number;
+}
+
 export interface TopicSummary extends TopicLink {
   group: TopicGroupKey;
   definition: string;
@@ -502,6 +514,8 @@ export interface TopicSummary extends TopicLink {
   indexable: boolean;
   /** The newest selected report. */
   latest: { title: string; at: string } | null;
+  /** 上升中 on the newest day the trends counted, when that was yesterday or the day before. */
+  rising: TopicRising | null;
 }
 
 export interface TopicsResponse {

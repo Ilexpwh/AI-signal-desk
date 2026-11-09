@@ -153,3 +153,14 @@ export const IDENTITY_CONTEXT_ALIASES: ReadonlyArray<{ entityId: string; pattern
   { entityId: "meta", pattern: /@AIatMeta\b/i },
   { entityId: "zhipu", pattern: /\bZhipu(?:\s+AI\b|['’]s\b)/i },
 ];
+
+// ── 主题的“上升中” ──────────────────────────────────────────────────────────────────────
+
+/**
+ * 主题页、主题目录和周报里的“上升中”：某一天报道这个主题的事件（有 editorial 信源报道的事件）不少于 minStories 个，
+ * 而且占当天全部这类事件的比例，是它前 28 天平均比例的 ratio 倍以上。每天的数由定时任务 topics.trend 写进 topic_trends 表，
+ * 这里的门槛在读的时候才用，改了马上生效，不用重算。
+ * 这是偏保守的起始值，不是校准出来的：站点攒下几周数据后，对照 topic_trends 里的数和你认为真在升温的日子再定（见 docs/customize.md），
+ * 不要凭感觉改。
+ */
+export const TOPIC_RISING = { minStories: 3, ratio: 3 };

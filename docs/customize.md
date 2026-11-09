@@ -25,7 +25,7 @@
 
 ## 2. 分类、标签和主题：`industry/taxonomy.ts`、`industry/topics.json`
 
-[`industry/taxonomy.ts`](../industry/taxonomy.ts) 定义类别（`CATEGORIES`）、报头重点发布计数（`RELEASE`）、总述免核对通用词（`PLAIN_TERMS`）、内容类型（`ITEM_TYPES`）、标签词表与近义词（`CATEGORY_TAGS`、`TOPIC_TAGS`、`ENTITY_TAGS`、`TAG_SYNONYMS`），以及公司名录和防张冠李戴词典（`ENTITIES`、`IDENTITY_LEXICON`、`PUBLISHER_DOMAINS`、`IDENTITY_CONTEXT_ALIASES`）。各字段含义直接看文件内注释，改动时注意这几处联动：
+[`industry/taxonomy.ts`](../industry/taxonomy.ts) 定义类别（`CATEGORIES`）、报头重点发布计数（`RELEASE`）、总述免核对通用词（`PLAIN_TERMS`）、内容类型（`ITEM_TYPES`）、标签词表与近义词（`CATEGORY_TAGS`、`TOPIC_TAGS`、`ENTITY_TAGS`、`TAG_SYNONYMS`），公司名录和防张冠李戴词典（`ENTITIES`、`IDENTITY_LEXICON`、`PUBLISHER_DOMAINS`、`IDENTITY_CONTEXT_ALIASES`），以及主题“上升中”的门槛（`TOPIC_RISING`）。各字段含义直接看文件内注释，改动时注意这几处联动：
 
 - **网址里的 `key` 上线后不改**：`CATEGORIES` 的 `key` 会进网址和订阅地址（`/all?category=`、`/feed/category/<key>.xml`）。要让某一类在公开接口、RSS 和 MCP 里并进另一类发布（网页上仍分开），在 `site/site.ts` 的 `PUBLIC_CATEGORIES` 里配。
 - **和提示词同步**：改了 `CATEGORIES`、标签词表或 `ITEM_TYPES`，要同步改 `industry/prompts/structure.md`（归类原则与标签规则）、`content-understanding.md`（内容类型枚举）、`selection-score.md`（内容类型的说明）和 `industry/selection.ts` 的 `weights`（每个内容类型的五维权重）；`industry/decisions.ts`（试用 Jev 的判断题）里的内容类型选项也跟着改，不改通不过类型检查。
@@ -33,6 +33,12 @@
 - **`industry/topics.json`**（主题目录 `/topics`）：站点启动时读取，改完重新构建（`docker compose up -d --build`）生效。分 `company`（公司与机构）、`field`（方向）、`genre`（内容形态）三组，`slug` 上线后不要改：
   - `company` 主题用 `entityId`（`ENTITIES` 的 id）收以这家公司为主体的报道；一篇报道的主体有几家公司时，标题里点了它的名才算。可选 `aliases`：搜索框里只搜这个词，也能找出这家公司的报道。
   - `field` 和 `genre` 主题用 `tags` 收打了这些标签的报道。
+- **主题的“上升中”**：每天 00:20（北京时间）定时任务 `topics.trend` 按北京时间的日子数一遍：每个主题当天有多少个事件被 `editorial` 信源报道（一个事件不管几篇报道只算一次，撤回的报道、只算热度的 `hot_signal` 信源不算），除以当天这样的事件总数，得到它当天的占比；再和它前 28 天的平均占比比，得出倍数。结果存在 `topic_trends` 表里，最近 7 天每次重算（晚到的报道和撤回都会算进去）。前 28 天里有事件的日子才进平均；这个主题前 28 天一次都没出现过的，没有倍数，也就不会“上升中”。某天的事件数不少于 `TOPIC_RISING.minStories`、倍数不低于 `TOPIC_RISING.ratio`，这个主题就在主题页、主题目录上标“上升中”（只看最近算出的那一天，最多是前天的；定时任务停了就不再标），周报也列出这一周里这样的主题（每个主题取倍数最高的那天，最多 5 个）。门槛在读的时候才用，改了马上生效，已经出过的周报不变。
+  - 默认的 `{ minStories: 3, ratio: 3 }` 是偏保守的起始值，不是校准出来的。站点跑上几周以后，用下面的查询看最近每个主题倍数最高的日子，挑出你认为真在升温的，再把门槛定在能留下它们、又不放进太多普通日子的位置：
+
+    ```bash
+    docker compose exec -T db psql -U aihot aihot -c "SELECT topic, day, stories, round(baseline, 4) AS baseline, round(ratio, 1) AS ratio FROM topic_trends WHERE day > current_date - 56 AND ratio IS NOT NULL ORDER BY ratio DESC LIMIT 60"
+    ```
 
 ## 3. 信源：`industry/sources.json`
 

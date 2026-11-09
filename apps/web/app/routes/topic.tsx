@@ -8,6 +8,7 @@ import { breadcrumbLd, pageMeta, titled, topicLd } from "../lib/seo";
 import { DayList, Pagination } from "../features/feed/DayList";
 import { BrandMark } from "../components/BrandMark";
 import { EmptyState } from "../components/ui/Page";
+import { Badge } from "../components/ui/Badge";
 import { IconArrowLeft } from "../components/icons";
 import { beijingDate } from "@aihot/contracts/time";
 import { monthDay, monthDayTime } from "../lib/format";
@@ -124,6 +125,15 @@ export default function TopicRoute() {
               共收录 <span className="num font-semibold text-ink-2">{topic.poolTotal.toLocaleString("zh-CN")}</span> 条
             </span>
           </p>
+          {topic.rising && (
+            <p className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] text-ink-3">
+              <Badge tone="hot">上升中</Badge>
+              <span>
+                {monthDay(topic.rising.day)} <span className="num font-semibold text-ink-2">{topic.rising.stories}</span> 个事件，占当天事件的比例是平时的{" "}
+                <span className="num font-semibold text-ink-2">{topic.rising.ratio}</span> 倍
+              </span>
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-4 text-[12px] text-ink-4">
           {topic.latest && (

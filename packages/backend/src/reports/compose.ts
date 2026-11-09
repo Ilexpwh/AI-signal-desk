@@ -16,6 +16,7 @@ import { chatJson } from "../providers/llm.ts";
 import { completeReceipt } from "../providers/receipts.ts";
 import { shutdownSignal } from "../jobs/queue.ts";
 import { emit } from "../modules.ts";
+import { risingTopics } from "../publication/topics.ts";
 import { arrangeDaily, candidates, dailyEdition, dailyPicks, periodEntries, sectionOf, SECTION_ORDER, type Candidate, type EditionEntry } from "./edition.ts";
 
 export const REPORT_VERSION = promptVersion("report-period", "report-period-sections", "report-period-no-sections");
@@ -125,6 +126,8 @@ export async function composeDaily(date: string, reason?: string): Promise<{ key
 
 /** A weekly's or monthly's size: the events it carries, chosen and ordered by rule. */
 const PERIOD_EVENTS = { weekly: 20, monthly: 30 } as const;
+/** A weekly's 上升中 section lists at most this many topics (publication/topics.ts risingTopics). */
+const WEEKLY_RISING = 5;
 /** A section is introduced once it carries this many events; one or two are read faster than introduced. */
 const INTRO_EVENTS = 3;
 /** The longest overview and introduction an issue prints; the brief asks for less, writers overshoot. */
@@ -195,7 +198,8 @@ export function fitted(text: string, max: number): string | null {
  * sections are decided by rule: the first event leads and the next three are the highlights. A model
  * only writes the overview and the introductions of sections with three or more events; text naming
  * anything the events do not name is not used, and overlong text keeps the leading sentences that fit.
- * Without a usable overview the issue is saved with none (see periodOverview).
+ * Without a usable overview the issue is saved with none (see periodOverview). A weekly also lists the
+ * topics that broke out during its week (上升中), from the daily trends and without the model.
  * An automatic run skips a complete period of quiet dailies without publishing an empty issue.
  */
 async function composePeriod(kind: "weekly" | "monthly", key: string, startDate: string, endDateInclusive: string, reason: string | undefined) {
@@ -255,6 +259,7 @@ async function composePeriod(kind: "weekly" | "monthly", key: string, startDate:
     overview,
     themes: groups.map((g) => ({ heading: g.label, summary: intro(g), storyRefs: g.items.map(({ category: _c, factKey: _f, ...e }) => e) })),
     storyOrder: top.map((e) => e.itemId),
+    ...(kind === "weekly" ? { rising: await risingTopics(startDate, endDateInclusive, WEEKLY_RISING) } : {}),
     metrics: { totalStories: top.length, selectedCount: selected.length, reportsCovered: issues },
     generator: { version: REPORT_VERSION, model, written: overview !== null },
   };

@@ -3,11 +3,13 @@
 // is one SQL predicate, `membership`: a direction or a form takes its tags; a company takes the reports
 // it is a subject of, but not those that only mention it — among several subject companies, its name must
 // appear in the Chinese or the original title. Lists and counts read the selected set one report per
-// fact, as v1 and RSS do.
+// fact, as v1 and RSS do. Which topics are 上升中 is read from the daily trends (events/trends.ts).
 import type { CategoryKey } from "@aihot/contracts/taxonomy";
 import type {
-  Brand, TopicGroup, TopicGroupKey, TopicLink, TopicPage, TopicSummary, TopicsResponse,
+  Brand, TopicGroup, TopicGroupKey, TopicLink, TopicPage, TopicRising, TopicSummary, TopicsResponse,
 } from "@aihot/contracts/site";
+import { addDays, beijingDate } from "@aihot/contracts/time";
+import { TOPIC_RISING } from "@aihot/industry/taxonomy";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { REPO_ROOT } from "../config.ts";
@@ -184,6 +186,8 @@ interface TopicIndex {
   bySlug: Map<string, TopicMember[]>;
   /** What each module's part of the topic pages computed with the index, by the module's name. */
   modules: Map<string, unknown>;
+  /** The topics 上升中, by slug. */
+  rising: Map<string, TopicRising>;
 }
 
 /** The full index or a bounded set of its candidates, with their current content and membership. */
@@ -217,17 +221,49 @@ async function readSeats(now: Date, ids?: string[], topics: Topic[] = TOPICS): P
 }
 
 async function readIndex(now: Date): Promise<TopicIndex> {
-  const members = (await readSeats(now)).filter((seat) => seat.topics.length > 0);
+  const [seats, rising] = await Promise.all([readSeats(now), risingNow(now)]);
+  const members = seats.filter((seat) => seat.topics.length > 0);
   const bySlug = new Map(TOPICS.map((t) => [t.slug, [] as TopicMember[]]));
   for (const seat of members) for (const slug of seat.topics) bySlug.get(slug)?.push(seat);
   const parts = serverModules().flatMap((m) => (m.topics?.page?.index ? [{ name: m.name, index: m.topics.page.index }] : []));
-  return { at: now, bySlug, modules: new Map(await Promise.all(parts.map(async (p) => [p.name, await p.index(members, now)] as const))) };
+  return { at: now, bySlug, rising, modules: new Map(await Promise.all(parts.map(async (p) => [p.name, await p.index(members, now)] as const))) };
 }
 
 const indexCache = cached(() => readIndex(new Date()), { freshMs: 60_000, maxStaleMs: 60_000 });
 
 /** A given `now` reads afresh (tests, a clock other than this minute's). */
 const topicIndex = (now?: Date) => (now ? readIndex(now) : indexCache.get());
+
+// ---------------------------------------------------------------------------------------------------
+// 上升中: the daily trends (events/trends.ts) held against industry/taxonomy.ts TOPIC_RISING as they are
+// read, so a changed cut-off applies at once.
+
+const breakingOut = () => sql`stories >= ${TOPIC_RISING.minStories} AND ratio >= ${TOPIC_RISING.ratio}`;
+
+const risingOf = (r: { day: string; stories: number; ratio: number }): TopicRising => ({ day: r.day, stories: r.stories, ratio: Math.round(r.ratio * 10) / 10 });
+
+/**
+ * The topics breaking out on the newest day counted before today (Beijing), when that is yesterday or
+ * the day before: a timer that has stopped shows no breakout rather than an old one.
+ */
+async function risingNow(now: Date): Promise<Map<string, TopicRising>> {
+  const today = beijingDate(now);
+  const rows = await sql<{ topic: string; day: string; stories: number; ratio: number }[]>`
+    SELECT topic, day::text AS day, stories, ratio FROM topic_trends
+    WHERE day = (SELECT max(day) FROM topic_trends WHERE day < ${today}::date) AND day >= ${addDays(today, -2)}::date AND ${breakingOut()}`;
+  return new Map(rows.map((r) => [r.topic, risingOf(r)]));
+}
+
+/** The topics that broke out from `start` to `end` (Beijing days, inclusive), each on its strongest day, strongest first. */
+export async function risingTopics(start: string, end: string, limit: number): Promise<Array<{ topic: string } & TopicRising>> {
+  const rows = await sql<{ topic: string; day: string; stories: number; ratio: number }[]>`
+    SELECT DISTINCT ON (topic) topic, day::text AS day, stories, ratio FROM topic_trends
+    WHERE day BETWEEN ${start}::date AND ${end}::date AND ${breakingOut()}
+    ORDER BY topic, ratio DESC, stories DESC, day`;
+  return rows.filter((r) => findTopic(r.topic))
+    .sort((a, b) => b.ratio - a.ratio || b.stories - a.stories || position(a.topic) - position(b.topic))
+    .slice(0, limit).map((r) => ({ topic: r.topic, ...risingOf(r) }));
+}
 
 const DAY = 86400_000;
 const RECENT_DAYS = 30;
@@ -265,8 +301,9 @@ async function currentSeats(ids: string[], now: Date, topics: Topic[] = TOPICS):
   return new Map((await readSeats(now, ids, topics)).map((s) => [s.id, s]));
 }
 
-function summarize(t: Topic, seats: TopicMember[], now: Date, brands: Map<string, Brand>, live: Map<string, TopicMember>): TopicSummary {
-  const recent = recentCount(seats, now);
+function summarize(t: Topic, index: TopicIndex, brands: Map<string, Brand>, live: Map<string, TopicMember>): TopicSummary {
+  const seats = index.bySlug.get(t.slug)!;
+  const recent = recentCount(seats, index.at);
   const latest = seats.slice(0, LATEST_CANDIDATES).map((s) => live.get(s.id)).find((s) => s?.topics.includes(t.slug));
   return {
     slug: t.slug,
@@ -278,13 +315,14 @@ function summarize(t: Topic, seats: TopicMember[], now: Date, brands: Map<string
     recent,
     indexable: isIndexable(seats.length, recent),
     latest: latest ? { title: latest.title, at: latest.at.toISOString() } : null,
+    rising: index.rising.get(t.slug) ?? null,
   };
 }
 
 export async function listTopicSummaries(): Promise<TopicsResponse> {
   const [index, brands] = await Promise.all([topicIndex(), companyBrands()]);
   const live = await currentSeats(TOPICS.flatMap((t) => index.bySlug.get(t.slug)!.slice(0, LATEST_CANDIDATES).map((s) => s.id)), new Date());
-  return { groups: TOPIC_GROUPS, topics: TOPICS.map((t) => summarize(t, index.bySlug.get(t.slug)!, index.at, brands, live)) };
+  return { groups: TOPIC_GROUPS, topics: TOPICS.map((t) => summarize(t, index, brands, live)) };
 }
 
 export interface TopicCount {
@@ -358,7 +396,7 @@ export async function loadTopicPage(slug: string, page: number, now?: Date): Pro
   ]);
   const groupName = TOPIC_GROUPS.find((g) => g.key === topic.group)?.name ?? "";
   return {
-    topic: { ...summarize(topic, seats, index.at, brands, live), groupName, poolTotal: pool },
+    topic: { ...summarize(topic, index, brands, live), groupName, poolTotal: pool },
     modules: Object.fromEntries(parts.map((part) => [part.name, part.part(live)])),
     items: rows.map(toFeedItemSummary),
     page,
