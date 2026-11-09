@@ -129,6 +129,13 @@ test("a page only a browser renders goes to the self-hosted renderer before Jina
       assert.equal(await renderPage("http://203.0.114.10/article"), null, "nor is a page read that ended on one");
       assert.equal(renders.length, 2);
     } finally { config.allowPrivateNetworkFetch = true; rendered = {}; }
+    rendered = { html: `<html><body><article>${"x".repeat(9 * 1024 * 1024)}</article></body></html>` };
+    assert.equal(await renderPage(`${base}/shell`), null, "a page past the direct fetch's size limit is not read");
+    rendered = {};
+    delete process.env.RENDER_TOKEN;
+    const sent = renders.length;
+    assert.equal(await renderPage(`${base}/shell`), null);
+    assert.equal(renders.length, sent, "without a token nothing is sent to the renderer");
   } finally { delete process.env.RENDER_URL; delete process.env.RENDER_TOKEN; }
 });
 
