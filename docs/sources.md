@@ -125,6 +125,8 @@
 - 已有完整网址时用 `{raw:url}`；只有 slug 时可用 `https://example.com/posts/{slug}`。`{字段路径}` 会编码字段值，`{raw:字段路径}` 原样插入。JSON 列表不会自动把相对网址补成绝对网址，模板应产出完整的 HTTP(S) 地址。
 - `summaryIsBody`：确认接口里的摘要就是全文时设为 `true`，把 `summaryPaths` 取到的文字当正文，不再去抓原文页。
 - 日期建议返回带时区的 ISO 字符串；`2026-09-30 17:43:58` 这类不带时区的时间，与网页列表一样按 `publishedAtUtcOffset` 读（默认 `+08:00`）；数字时间戳分别设 `publishedAtUnit: "epoch_s"`（秒）或 `"epoch_ms"`（毫秒），`20261001` 这类日期设 `"yyyymmdd"`。
+- 模板里的字段有一个为空，这条就用 `urlTemplateFallback` 再生成一次（比如有的条目有外链、有的只有 ID）。
+- 按字段筛条目：`minNumeric: { "path": "points", "min": 100 }` 只收这个数字不小于 `min` 的，`requireBoolean: { "path": "published", "equals": true }` 只收这个字段正好等于 `equals` 的。
 - 缺少标题或无法生成链接的条目会跳过。非空数组全部映射失败时，会报 `no items mapped (check title/url paths)`；路径不是数组时，会报 `items path did not resolve to an array`。
 
 ### 本地跑通 HTML/JSON 示例
@@ -263,3 +265,135 @@ Content-Type: application/json
 - `sourceId` 不存在时会自动建一个 `external` 信源，默认不进公开页面：到后台把它的参与方式改成 `editorial` 才会出现在站上。
 - 在后台暂停信源后，推送接口返回 409，不再接收新文章；恢复信源后可以继续推送。
 - 条目的 `raw._aihot.backfill` 为 `true` 时按历史回灌处理（不进入“今天”、不推送）。
+
+## 常用信源配方
+
+下面的配置在 2026-11-09 用“预览抓取”对真实接口试过（自建 RSSHub 一节除外），写出的条目数是当时的结果，用来对照。接口的字段和限制会变，创建前再预览一次。要不要接、接哪些，由你决定；参与方式和分级是建议。
+
+所有配方都保持 `site_fulltext`、`syndicate_fulltext` 关闭：这些平台没有授权站内展示或转发全文，只显示摘要和原文链接。
+
+参与方式决定费用：
+
+- `editorial`：内容本身要进精选。每条先预筛一次，过了的再评分、结构化和写作，按条调用模型。
+- `hot_signal`：只想知道大家在讨论什么（社区、聚合、搜索结果）。不预筛也不写作，每条只做一次向量化，召回到相近的事件时再做一次关系判断；不单独展示，只给事件加热度。除了下面 Hacker News 那样按账号计的社区信源，一个信源在热度里只算一个来源，订阅里有多少条都一样。
+
+### Hacker News（`json_list`，热度证据）
+
+用 HN 官方的 Algolia 搜索接口读首页，只收 100 分以上的帖子：
+
+```json
+{
+  "url": "https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=50",
+  "mode": "json_api",
+  "itemsPath": "hits",
+  "titlePaths": ["title"],
+  "urlTemplate": "https://news.ycombinator.com/item?id={objectID}",
+  "summaryPaths": ["story_text", "url"],
+  "authorPaths": ["author"],
+  "publishedAtPath": "created_at_i",
+  "publishedAtUnit": "epoch_s",
+  "externalIdPath": "objectID",
+  "minNumeric": { "path": "points", "min": 100 }
+}
+```
+
+- 参与方式选 `hot_signal`，分级 `T2`。再把信源 ID 加进 `site/site.ts` 的 `COMMUNITY_FEEDS.hn`，热度就按发帖账号计，一个账号算一个来源；不加的话整个 HN 只算一个来源。
+- 原文链接用 HN 的讨论页，不用帖子指向的网址。指向的文章如果已经被别的信源收进来，同一个网址只会记成那篇文章又被发现了一次，不会作为一条讨论进热度。帖子指向的网址放进摘要，归组时用得上。
+- 预览时首页 50 条里有 18 条过了 100 分。分数线按你想要的热闹程度改；`tags=front_page` 换成 `tags=story&query=关键词` 就是按关键词搜。
+
+### Hugging Face 每日论文（`json_list`）
+
+```json
+{
+  "url": "https://huggingface.co/api/daily_papers?limit=50",
+  "mode": "json_api",
+  "titlePaths": ["title", "paper.title"],
+  "urlTemplate": "https://huggingface.co/papers/{paper.id}",
+  "summaryPaths": ["paper.summary", "summary"],
+  "publishedAtPath": "publishedAt",
+  "externalIdPath": "paper.id",
+  "minNumeric": { "path": "paper.upvotes", "min": 10 }
+}
+```
+
+- 接口直接返回数组，所以不写 `itemsPath`。这是社区投票挑出来的论文，量比 arXiv 小得多，适合 `editorial`、`T2`。
+- `minNumeric` 只收至少 10 票的，预览时 50 篇里有 23 篇。票数按抓取那一刻算，刚上榜的论文票还少，线定得太高会漏掉当天的新论文。
+
+### arXiv（`rss`）
+
+```json
+{ "feedUrl": "https://rss.arxiv.org/rss/cs.CL" }
+```
+
+- 量很大：2026-11-09 这天 `cs.AI` 一个分类就有 397 条，`cs.AI+cs.CL`（多个分类用 `+` 连）有 469 条，其中有旧论文的新版本（摘要里写着 `Announce Type: replace`）。按 `editorial` 收，每条都要预筛一次，过了的还要评分和写作。先在后台“设置 → 付费请求上限”看预算，或者只用上面的 HF 每日论文。
+
+### Google News 按公司或关键词（`rss`，热度证据）
+
+```json
+{ "feedUrl": "https://news.google.com/rss/search?q=%22Anthropic%22+when:1d&hl=en-US&gl=US&ceid=US:en" }
+```
+
+- 参与方式选 `hot_signal`。原文链接是 Google 的跳转地址（`news.google.com/rss/articles/…`），读不到原文，也和别的信源收到的同一篇对不上网址；标题后面带着“ - 媒体名”。只当热度证据，靠标题归组。
+- 一个订阅在热度里只算一个来源，30 家媒体报道同一件事也只加一份。
+- `q` 里英文双引号包住的词要完整出现，`when:1d` 只要一天以内的。预览返回 100 条，不全相关，有的只在正文里提到这家公司；召回不到事件的记成没匹配上，不影响别的事件。
+- 中文结果把后面三个参数换成 `hl=zh-CN&gl=CN&ceid=CN:zh-Hans`。
+
+### Reddit 版块（`rss`，热度证据）
+
+```json
+{ "feedUrl": "https://www.reddit.com/r/MachineLearning/top/.rss?t=day" }
+```
+
+- 一个版块一个信源，`top/.rss?t=day` 是一天内最热的帖子（预览时 8 条）。链接是 Reddit 的讨论页，用 `hot_signal`。
+- Reddit 对不登录的请求限流，被拒时后台会显示失败原因。公开站接入前看一下 Reddit 的数据使用条款。
+
+### Mastodon 话题或账号（`json_list`）
+
+Mastodon 的 RSS 条目没有标题，`rss` 会把它们全部跳过，所以用它的公开 JSON 接口：
+
+```json
+{
+  "url": "https://mastodon.social/api/v1/timelines/tag/LLM?limit=40",
+  "mode": "json_api",
+  "titlePaths": ["content"],
+  "urlTemplate": "{raw:url}",
+  "summaryPaths": ["content"],
+  "authorPaths": ["account.acct"],
+  "publishedAtPath": "created_at",
+  "externalIdPath": "id"
+}
+```
+
+- 帖子没有标题，用去掉 HTML 的正文当标题。话题流很杂，预览的 40 条里有日语帖、机器人转发和与话题无关的内容，用 `hot_signal`。
+- 只看一个账号：先打开 `https://mastodon.social/api/v1/accounts/lookup?acct=用户名` 记下数字 `id`，地址换成 `https://mastodon.social/api/v1/accounts/<id>/statuses?exclude_replies=true&exclude_reblogs=true&limit=40`，其他字段不变。官方账号可以用 `editorial`。
+
+### 自建 RSSHub（`rss`）
+
+RSSHub 能给很多没有订阅的网站生成 RSS，包括 Bluesky（它自己的 RSS 也没有标题）。公共实例 `rsshub.app` 拒绝程序抓取（预览返回 403），要自己跑一个。在 `docker-compose.yml` 里加一个服务，和站点在同一个网络里，不要给它映射端口：
+
+```yaml
+  rsshub:
+    image: diygod/rsshub:latest
+    restart: unless-stopped
+```
+
+上线时把 `latest` 换成固定的版本标签。`.env` 里设 `PRIVATE_FEED_HOSTS=rsshub`，重启 API 和 worker，订阅地址写成 `http://rsshub:1200/<路由>`：
+
+| 内容 | 路由 |
+|---|---|
+| GitHub 每日趋势 | `/github/trending/daily/any` |
+| Product Hunt 当日 | `/producthunt/today` |
+| 36氪快讯 | `/36kr/newsflashes` |
+| Telegram 公开频道 | `/telegram/channel/<频道名>` |
+| Bluesky 账号 | `/bsky/profile/<handle>` |
+
+- 这几条路由没有在本机预览过，路由名以 [RSSHub 文档](https://docs.rsshub.app/) 为准，创建前先预览。
+- `PRIVATE_FEED_HOSTS` 只放行订阅地址本身。RSSHub 生成的文章链接是原站地址，正文照常按原来的规则读。
+
+### 需要登录的信源
+
+这些也能接，但要用你自己的账号或 Cookie，这里不给配置：
+
+- 微博、知乎、小红书：RSSHub 有对应的路由，要在 RSSHub 的环境变量里配 Cookie。Cookie 会过期，账号也可能被平台限制。
+- 公众号：用现有的 `mp_account`（极致了，按次计费）；也可以自建 we-mp-rss 这类转 RSS 的服务，它要扫码登录一个微信号。
+- 这些平台的内容同样只显示摘要和原文链接，不会因为抓得到就打开全文，见 [分级、参与方式与全文](#分级参与方式与全文)。
