@@ -1,6 +1,7 @@
 // Checks the selection against your own labelled samples (a "gold set"): each case runs the site's
 // selection steps (editorial/analyze.ts) — the prefilter, then the score prompt twice with every model in
-// --models, the two scores deciding against the case's tier threshold (gold cases carry no source class) — and is compared with your
+// --models (each call's content type and axes weighed by industry/selection.ts, and shown as the case's reason),
+// the two scores deciding against the case's tier threshold (gold cases carry no source class) — and is compared with your
 // decision. A threshold sweep shows what another threshold would have done. The gold file has one case
 // per line as eval-selection-core.ts describes; lines starting with // are skipped.
 // Usage: node --env-file=.env scripts/eval-selection.ts [--gold .data/gold.jsonl] [--models default,deepseek-flash] [--n 200] [--split all] [--label "..."]
@@ -89,6 +90,12 @@ interface Outcome {
 const decide = (x: Outcome, threshold?: number): SelectionDecision | null =>
   x.error !== null ? null : x.relevance === "pass" && scoresSelect(x.scores, threshold) ? "select" : "reject";
 
+/** Why a case scored as it did: each call's content type and axes, shown beside the case in SelectBench. */
+const axesReason = (scores: AnalysisRun["scores"]): string | null =>
+  scores?.axes.length
+    ? scores.axes.map((s) => `${s.itemType} sig${s.sig} nov${s.nov} cred${s.cred} reson${s.reson} act${s.act}${s.thin ? " thin" : ""}`).join(" / ")
+    : null;
+
 const models = await evalModels(values.models, "score");
 
 const report: Record<string, unknown> = {};
@@ -163,6 +170,7 @@ for (const model of models) {
     decision: decide(x),
     score: shownScore(x.scores),
     relevance: x.relevance,
+    reason: axesReason(x.scores),
     receiptId: x.receiptIds[0] ?? null,
     error: x.error,
   }));

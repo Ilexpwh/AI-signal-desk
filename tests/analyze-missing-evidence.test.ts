@@ -1,7 +1,7 @@
 // A title cannot supply the missing article: no scoring, writing or public eligibility until
 // material arrives. Feed excerpts, quoted text and displayable original posts keep their path.
 import { pointModels, stub, tag } from "./setup.ts";
-import { analysisStep, SELECTING_SCORE } from "./analysis-steps.ts";
+import { analysisStep, SELECTING_ANSWER } from "./analysis-steps.ts";
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { closeDb } from "@aihot/backend/db";
@@ -14,7 +14,7 @@ const provider = await stub((_hit, request) => {
   const step = analysisStep(request.body);
   steps.push(step);
   const output = step === "prefilter" ? { label, reason: "fixture" }
-    : step === "score" ? { attentionScore: SELECTING_SCORE }
+    : step === "score" ? SELECTING_ANSWER
     : step === "structure" ? { scope: "unknown", category: "model", tags: [], subjects: [], fact: null }
     : { itemType: "model_release", authorRole: "principal", titleZh: "模型发布", summaryZh: "来源确认模型发布。", bodyZh: "来源确认模型发布。", tags: [], editorialJudgment: "fixture" };
   return { choices: [{ message: { content: JSON.stringify(output) } }] };

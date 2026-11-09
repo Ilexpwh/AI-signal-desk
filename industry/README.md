@@ -8,7 +8,7 @@
 | `topics.json` | 主题目录（`/topics`），站点启动时读取 |
 | `sources.json` | 首次启动时导入的示范信源 |
 | `prompts/` | 每一步的提示词：预筛、评分、写作、结构化、归组、事件综述、周报月报、翻译 |
-| `selection.ts` | 入选门槛 |
+| `selection.ts` | 入选门槛，以及评分五个维度按内容类型的权重 |
 | `gold.example.jsonl` | 精选评测样本的格式示例 |
 | `relation-gold.example.jsonl` | 事件关系评测样本的格式示例 |
 | `story-digest-eval.example.jsonl` | 事件综述评测案例的格式示例 |

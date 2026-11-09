@@ -62,6 +62,12 @@ MCP 默认接受 `SITE_URL` 的主机以及 `localhost`、`127.0.0.1`、`[::1]`�
 
 ### 更新
 
+**评分改为五个维度（AI-signal-desk）**：评分模型不再自己算总分，改为输出内容类型、五个维度（0–10）和 `thin`，总分由 `industry/selection.ts` 新增的 `weights`（每个内容类型一行权重，和原来提示词里的权重表相同）与 `thinCap` 合成。没有数据库迁移，没有新环境变量；已经判过的资料不会重算，之后的新资料按新格式评分，五个维度存在判断记录的 `output.scoreAxes` 里。要注意：
+
+- **自己改过 `industry/prompts/selection-score.md` 的**，合并时把输出改成新的七个字段（见示范提示词末尾），并把权重表搬到 `industry/selection.ts` 的 `weights`；还在输出 `attentionScore` 的提示词会让每次评分都因格式不对而失败。
+- 自己改过 `industry/selection.ts` 的，补上 `weights` 和 `thinCap`，不补通不过类型检查。
+- 上线前后各用 `scripts/eval-selection.ts` 在自己标注的样本上跑一遍（见 [精选与校准](selection.md)），门槛只在扫描结果的最佳值移动时再改。
+
 **2026 年 10 月 31 日的引擎同步**有三个数据库迁移（`0090`–`0092`），照下面的命令更新时 setup 会跑它们：信源多一列可选的类别 `selection_class`，反馈多了 `kind`（类型）和 `idea`（归入的建议）两列，都可以为空，旧数据不用改。没有必填的新环境变量。要注意的变化：
 
 - **`industry/selection.ts` 多了 `classes` 和 `browseFloor`**，见 [精选与校准](selection.md#门槛industryselectionts)；自己改过这个文件的，合并时补上这两项，不补通不过类型检查。

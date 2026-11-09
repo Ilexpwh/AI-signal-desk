@@ -6,6 +6,7 @@ import { describePublicationTime } from "../sources/dates.ts";
 //   1. prefilter: does the material belong to this industry at all (wide recall). Only BLOCK stops an
 //      item; a BLOCK on an original post without text counts as UNKNOWN;
 //   2. score: two independent scores against the source's threshold (tier and class, industry/selection.ts) decide 精选;
+//      each call returns the content type and five axes, weighed here by the type's row in industry/selection.ts;
 //   3. structure: category, tags, subjects and the current news fact, beside scoring;
 //   4. writing, once the structure is in: the Chinese title, summary and reason by the content
 //      understanding for selected and near-selected items, by the cheaper title/summary prompts for the rest;
@@ -73,7 +74,31 @@ const scoreCall = (model: string) => MODELS[model]?.scoreCall ?? { temperature: 
 /** The score prompt: the industry's taste (industry/prompts/selection-score.md). */
 export const SCORE_SYSTEM = promptText("selection-score");
 
-export const ScoreSchema = z.object({ attentionScore: z.coerce.number().int().min(0).max(100) });
+const AXES = ["sig", "nov", "cred", "reson", "act"] as const;
+const Axis = z.coerce.number().int().min(0).max(10);
+
+/** One score call's answer: the content type and the five axes of the rubric; the total is weighed here, not by the model. */
+export const ScoreSchema = z.object({
+  itemType: z.preprocess((v) => String(v ?? "").trim(), z.enum(ITEM_TYPES)),
+  sig: Axis, nov: Axis, cred: Axis, reson: Axis, act: Axis,
+  thin: z.boolean(),
+});
+export type ScoreAxes = z.infer<typeof ScoreSchema>;
+
+// A type's weights are whole and sum to 10, so five 0–10 axes always weigh into 0–100.
+for (const [type, row] of Object.entries(SELECTION.weights)) {
+  const weights = AXES.map((k) => row[k]);
+  if (weights.some((w) => !Number.isInteger(w) || w < 0) || weights.reduce((s, w) => s + w, 0) !== 10) {
+    throw new Error(`industry/selection.ts weights.${type}: five whole, non-negative weights that sum to 10`);
+  }
+}
+
+/** One call's score: its content type's weighted axes, held to `thinCap` when the material is too thin to judge. */
+export function weighedScore(s: ScoreAxes): number {
+  const w = SELECTION.weights[s.itemType];
+  const total = AXES.reduce((sum, k) => sum + s[k] * w[k], 0);
+  return s.thin ? Math.min(total, SELECTION.thinCap) : total;
+}
 
 const SCORE_TIME = new Intl.DateTimeFormat("sv-SE", {
   timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
@@ -100,7 +125,7 @@ export function buildScoreInput(a: AnalyzeInputArticle): string {
   if (!body) body = a.title;
   const at = a.publishedAt;
   return [
-    "请按系统规则评估以下单篇材料所代表的事件。只输出 attentionScore。",
+    "请按系统规则评估以下单篇材料所代表的事件。只输出系统规则要求的 JSON。",
     `【发布时间（北京时间）】\n${at ? a.publicationTime === undefined || a.publicationTime?.includes("T") ? scoreInputTime(at) : describePublicationTime(at, a.publicationTime) : "未知（收录时间不代表发布时间）"}`,
     `【标题】\n${a.title.trim()}`,
     `【完整正文】\n${body.length > MAX_BODY_CHARS ? body.slice(0, MAX_BODY_CHARS) : body}`,
@@ -198,7 +223,7 @@ export interface AnalysisRun {
    * The independent score calls and the source's threshold they are held against; absent when the material
    * is not scored. `refused`: the model's content filter declined it, so it is not selected.
    */
-  scores: { model: string; threshold: number; values: number[]; receiptIds: number[]; reused: boolean; refused?: boolean } | null;
+  scores: { model: string; threshold: number; values: number[]; axes: ScoreAxes[]; receiptIds: number[]; reused: boolean; refused?: boolean } | null;
   /** The reader-facing copy: `understand` (selected, near-selected), `summarize`, `verbatim` (a Chinese short post), `none`. */
   writing: {
     kind: "understand" | "summarize" | "verbatim" | "none";
@@ -278,6 +303,7 @@ async function runScores(
   const call = scoreCall(model);
   const input = buildScoreInput(a);
   const values: number[] = [];
+  const axes: ScoreAxes[] = [];
   const receiptIds: number[] = [];
   let reused = true;
   // One after the other: the second call reuses the provider's cached prompt.
@@ -291,18 +317,19 @@ async function runScores(
         attemptTag: tagged(opts.attemptTag, `score-${i + 1}`),
       });
       onReceipt?.(res.receiptId);
-      values.push(res.data.attentionScore);
+      values.push(weighedScore(res.data));
+      axes.push(res.data);
       receiptIds.push(res.receiptId);
       reused &&= res.reused;
     } catch (error) {
       const receiptId = failedReceiptId(error);
       if (receiptId !== null) onReceipt?.(receiptId);
       // The model's content filter declines the material (Zhipu 1301): not scored, so not selected.
-      if (isContentFilter(error)) return { model, threshold, values, receiptIds, reused: false, refused: true };
+      if (isContentFilter(error)) return { model, threshold, values, axes, receiptIds, reused: false, refused: true };
       throw error;
     }
   }
-  return { model, threshold, values, receiptIds, reused };
+  return { model, threshold, values, axes, receiptIds, reused };
 }
 
 /** The production score step; its threshold stays case-specific even when an evaluator shares model output. */
@@ -513,6 +540,7 @@ export function normalizeAnalysis(run: AnalysisRun) {
   // Original posts can consist entirely of media. Model-written copy still needs a title and summary.
   const relevance = label === "BLOCK" ? "block" : !run.writing || !titleZh || (!summaryZh && run.writing.kind !== "verbatim") ? "unknown" : "pass";
   const values = run.scores && !run.scores.refused ? run.scores.values : null;
+  const scoreAxes = run.scores && !run.scores.refused ? run.scores.axes : null;
   const score = shownScore(run.scores);
   const threshold = run.scores?.threshold ?? null;
   const selected = relevance === "pass" && scoresSelect(run.scores);
@@ -527,6 +555,7 @@ export function normalizeAnalysis(run: AnalysisRun) {
     selected,
     score,
     scores: values,
+    scoreAxes,
     scoreModel: run.scores?.model ?? null,
     scoreRefused: run.scores?.refused ?? false,
     threshold,
@@ -569,7 +598,7 @@ export async function analyzeArticle(articleId: string, opts: StepOpts = {}): Pr
   const w = run.writing;
   const detail = {
     prefilter: run.prefilter && { label: run.prefilter.label, reason: run.prefilter.reason },
-    scores: out.scores, scoreModel: out.scoreModel, threshold: out.threshold, ...(out.scoreRefused ? { scoreRefused: true } : {}),
+    scores: out.scores, scoreAxes: out.scoreAxes, scoreModel: out.scoreModel, threshold: out.threshold, ...(out.scoreRefused ? { scoreRefused: true } : {}),
     ...(w ? { writer: w.kind, writerModel: w.model, itemType: w.itemType ?? null, authorRole: w.authorRole ?? null } : {}),
     ...(w?.identityGuard?.outcome === "fallback" ? { identityGuard: w.identityGuard } : {}),
     scope: out.scope, fact: out.fact,

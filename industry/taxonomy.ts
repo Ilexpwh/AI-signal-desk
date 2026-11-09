@@ -32,7 +32,7 @@ export const PLAIN_TERMS: readonly string[] = ["ai", "api", "llm", "gpu", "agi",
 
 /**
  * 内容理解一步给每篇资料判的“内容类型”（写在 prompts/content-understanding.md 里，改了类型要同步改那份提示词）。
- * 评分提示词（prompts/selection-score.md）按类型给五个维度不同的权重。
+ * 评分模型（prompts/selection-score.md）也判这个类型，selection.ts 的 weights 按类型给五个维度不同的权重。
  */
 export const ITEM_TYPES = ["model_release", "product_launch", "tool_or_prompt", "research_paper", "industry_event", "opinion_analysis", "tutorial_explainer"] as const;
 
