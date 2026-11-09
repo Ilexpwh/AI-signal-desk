@@ -165,7 +165,7 @@ function detailNeed(c: CollectionCandidate, stored: StoredDetail | undefined, so
   return need.date || need.title || need.summary ? need : null;
 }
 
-/** A detail page's findings. A body comes from the same Readability path as extraction, using bytes already fetched. */
+/** A detail page's findings. A body comes from the same readers as extraction (Readability, then Defuddle), using bytes already fetched. */
 function applyDetail(c: CollectionCandidate, got: Awaited<ReturnType<typeof fetchDetail>>, rules: string): void {
   c.detailRules = rules;
   if (got.title) c.title = got.title;
