@@ -11,7 +11,9 @@ import { describePublicationTime } from "../sources/dates.ts";
 //   3. structure: category, tags, subjects and the current news fact, beside scoring;
 //   4. writing, once the structure is in: the Chinese title, summary and reason by the content
 //      understanding for selected and near-selected items, by the cheaper title/summary prompts for the rest;
-//      copy that uses a word the site keeps from readers (industry/wording.ts) goes back once to change only those.
+//      copy that uses a word the site keeps from readers (industry/wording.ts) goes back once to change only those;
+//   5. checks of the copy, recorded only (nothing changes for readers): whether the title names the company of the
+//      fact (code), and, for the content understanding's copy, each of its claims against the material (one more call).
 // Material with only a title or a feed summary has its article page fetched before it is judged.
 // Material that repeats an article another source already had judged takes that judgement instead, with
 // none of these steps (copies.ts, checked by the analysis job).
@@ -22,7 +24,7 @@ import { SELECTION } from "@aihot/industry/selection";
 import { ITEM_COPY } from "@aihot/site";
 import { sql } from "../db.ts";
 import { chatJson, MODELS, type ContentPart } from "../providers/llm.ts";
-import { completeReceipt, failedReceiptId, failureKind } from "../providers/receipts.ts";
+import { completeReceipt, failedReceiptId, failureKind, type FailureKind } from "../providers/receipts.ts";
 import { collapseWhitespace } from "../lib/text.ts";
 import { modelFor, modelRoute, modelSupportsVision } from "./models.ts";
 import { buildMaterial, firstImagePart, loadAnalyzeInput, type AnalyzeInputArticle } from "./input.ts";
@@ -30,7 +32,7 @@ import { pageFetchable } from "../content/extract.ts";
 import { shutdownSignal } from "../jobs/queue.ts";
 import {
   buildArticlePrompt, buildLongTweetPrompt, buildShortTweetPrompt, finalizeCopy, isShortTweetInput, looksZh, MAX_BODY_CHARS, missingEvidence,
-  needsShortTweetTranslation, parseTranslateOutput, PREFILTER_SYSTEM, prefilterUser, translateInputOf, UNDERSTAND_SYSTEM, understandUser,
+  needsShortTweetTranslation, parseTranslateOutput, PREFILTER_SYSTEM, prefilterUser, subjectGuard, translateInputOf, UNDERSTAND_SYSTEM, understandUser,
   type IdentityGuard,
 } from "./writing.ts";
 import { CATEGORY_GUIDE, CATEGORY_TAGS, ENTITIES, ENTITY_TAGS, ITEM_TYPES, normalizeTags, TOPIC_TAGS } from "./vocabulary.ts";
@@ -48,6 +50,7 @@ export const PROMPT_VERSIONS = {
   summarize: promptVersion("summarize-article", "summarize-article-empty", "summarize-short-post", "summarize-short-post-quoted", "summarize-long-post", "summarize-long-post-quoted", "identity-context"),
   structure: promptVersion("structure"),
   wording: promptVersion("mend-wording"),
+  verify: promptVersion("verify-copy"),
 } as const;
 /** Every step's prompt, as stored on each judgement. */
 export const SELECTION_PROMPT_VERSION = [PROMPT_VERSIONS.prefilter, PROMPT_VERSIONS.score].join("+");
@@ -204,18 +207,30 @@ export const STRUCTURE_SYSTEM = promptText("structure", {
   entities: Object.entries(ENTITIES).map(([id, e]) => `${id}（${e.aliases.slice(0, 3).join("/")}）`).join("，"),
 });
 
-/** Keep only quotes present both in the original material and in the text the structure model saw. */
-export function normalizeStructure(data: z.infer<typeof StructureSchema>, a: AnalyzeInputArticle) {
+/** The material's own text: the body, or the post and the post it quotes (whitespace collapsed). */
+const originalTexts = (a: AnalyzeInputArticle) => (a.xPost
+  ? [String(a.xPost.text ?? a.title), String(a.xPost.quoted?.text ?? "")]
+  : [a.bodyText ?? a.excerpt ?? ""]).map(collapseWhitespace);
+
+/**
+ * A quote from the material as a model saw it (buildMaterial), kept only when it is present both there and in the
+ * original material itself (not the source, the title or a translation); null otherwise.
+ */
+function groundedIn(a: AnalyzeInputArticle) {
   const visible = collapseWhitespace(buildMaterial(a));
-  const originals = (a.xPost
-    ? [String(a.xPost.text ?? a.title), String(a.xPost.quoted?.text ?? "")]
-    : [a.bodyText ?? a.excerpt ?? ""]).map(collapseWhitespace);
-  // A title is not the unseen contents of a video/article, regardless of the model's confidence.
-  const scope = originals.some(Boolean) ? data.scope : "unknown";
-  const grounded = (quote: string | null | undefined) => {
+  const originals = originalTexts(a);
+  return (quote: string | null | undefined) => {
     const text = collapseWhitespace(quote ?? "");
     return text && visible.includes(text) && originals.some((original) => original.includes(text)) ? text : null;
   };
+}
+
+/** Keep only quotes present both in the original material and in the text the structure model saw. */
+export function normalizeStructure(data: z.infer<typeof StructureSchema>, a: AnalyzeInputArticle) {
+  const originals = originalTexts(a);
+  // A title is not the unseen contents of a video/article, regardless of the model's confidence.
+  const scope = originals.some(Boolean) ? data.scope : "unknown";
+  const grounded = groundedIn(a);
   const fact = !originals.some(Boolean) || scope === "composite" || !data.fact ? null : {
     ...data.fact,
     evidence: grounded(data.fact.evidence),
@@ -254,6 +269,8 @@ export interface AnalysisRun {
     reused: boolean;
   } | null;
   structure: (ReturnType<typeof normalizeStructure> & { model: string; receiptId: number; reused: boolean }) | null;
+  /** The content understanding's copy checked claim by claim against the material (verifyCopy); `failed` when the check could not be had. */
+  grounding: { model: string; claims: Claim[]; receiptId: number; reused: boolean } | { failed: FailureKind } | null;
 }
 
 const isContentFilter = (error: unknown) => failureKind(error) === "refused" && /contentFilter|"1301"/.test((error as Error).message);
@@ -461,6 +478,44 @@ async function mendWording(a: AnalyzeInputArticle, w: NonNullable<AnalysisRun["w
   return { ...w, ...mended, identityGuard: copy.identityGuard ?? w.identityGuard, ...paid };
 }
 
+export const VERIFY_SYSTEM = promptText("verify-copy");
+const ClaimSchema = z.object({
+  part: z.preprocess((v) => String(v ?? "").trim().toLowerCase(), z.enum(["title", "summary"])),
+  text: z.string().trim().min(1).max(200),
+  verdict: z.preprocess((v) => String(v ?? "").trim().toLowerCase(), z.enum(["supported", "unsupported", "unclear"])),
+  quote: z.string().max(600).nullable().catch(null),
+});
+type Claim = z.infer<typeof ClaimSchema>;
+const VerifySchema = z.object({ claims: z.array(ClaimSchema).max(20) });
+
+/**
+ * The content understanding's title and summary, claim by claim against the material (industry/prompts/verify-copy.md).
+ * A quote must be found as the structure's are (groundedIn): a claim citing one that is not, or supported without
+ * one, counts as unclear. Only recorded: a check that cannot be had leaves the copy and the judgement as they are.
+ */
+async function verifyCopy(a: AnalyzeInputArticle, w: NonNullable<AnalysisRun["writing"]>, opts: StepOpts): Promise<AnalysisRun["grounding"]> {
+  if (w.kind !== "understand" || !w.titleZh || !w.summaryZh) return null;
+  checkAnalysisRunning();
+  try {
+    const res = await chatJson({
+      model: await modelFor("verify"), purpose: "verify_copy", subject: subjectOf(a), promptVersion: PROMPT_VERSIONS.verify, system: VERIFY_SYSTEM,
+      user: [buildMaterial(a), `中文稿：\n${JSON.stringify({ titleZh: w.titleZh, summaryZh: w.summaryZh })}`].join("\n\n"),
+      schema: VerifySchema, temperature: 0, maxTokens: 4096, attemptTag: tagged(opts.attemptTag, "verify"),
+    });
+    const grounded = groundedIn(a);
+    const claims = res.data.claims.map((c): Claim => {
+      const quote = grounded(c.quote) || null;
+      const unfound = c.quote?.trim() ? !quote : c.verdict === "supported";
+      return { ...c, verdict: unfound ? "unclear" : c.verdict, quote };
+    });
+    return { model: res.model, claims, receiptId: res.receiptId, reused: res.reused };
+  } catch (error) {
+    // A stopping worker still stops before the commit; any other failure is recorded, and the next analysis asks again.
+    if (shutdownSignal.signal.aborted) throw error;
+    return { failed: failureKind(error) };
+  }
+}
+
 /** The title/summary prompts (articles, long and short posts). */
 async function runSummarize(a: AnalyzeInputArticle, opts: StepOpts): Promise<NonNullable<AnalysisRun["writing"]>> {
   const t = translateInputOf(a);
@@ -535,9 +590,9 @@ export function decidingScores(scores: AnalysisRun["scores"], threshold: number)
 export async function runAnalysis(a: AnalyzeInputArticle, opts: StepOpts = {}): Promise<AnalysisRun> {
   checkAnalysisRunning();
   // Missing article text waits for a later revision, before any paid step; displayable original posts keep their judgement.
-  if (awaitsMaterial(a)) return { prefilter: null, scores: null, writing: null, structure: null };
+  if (awaitsMaterial(a)) return { prefilter: null, scores: null, writing: null, structure: null, grounding: null };
   const prefilter = await runSelectionPrefilter(a, opts);
-  if (prefilter.label === "BLOCK") return { prefilter, scores: null, writing: null, structure: null };
+  if (prefilter.label === "BLOCK") return { prefilter, scores: null, writing: null, structure: null, grounding: null };
   const original = originalPostCopy(a.xPost, a.url);
   // The structure step needs nothing from the scores: it runs beside them.
   const structure = runStructure(a, opts).then((value) => ({ value }), (error: unknown) => ({ error }));
@@ -552,7 +607,7 @@ export async function runAnalysis(a: AnalyzeInputArticle, opts: StepOpts = {}): 
     const writing: NonNullable<AnalysisRun["writing"]> = original
       ? { kind: "verbatim", model: null, titleZh: original.title, summaryZh: original.summary ?? "", reasonZh: null, receiptIds: [], reused: true }
       : await mendWording(a, (near ? await runUnderstand(a, opts) : null) ?? (await runSummarize(a, opts)), opts);
-    return { prefilter, scores, writing, structure: s.value };
+    return { prefilter, scores, writing, structure: s.value, grounding: await verifyCopy(a, writing, opts) };
   } finally {
     // A score/writing error or deploy must not let the job finish while a paid structure request
     // still owns a response. It settles and stores its receipt before shutdown can close the DB.
@@ -595,6 +650,7 @@ export function normalizeAnalysis(run: AnalysisRun) {
     reasonZh: run.writing?.reasonZh ?? null,
     scope: run.structure?.scope ?? "unknown",
     fact: run.structure?.fact ?? null,
+    subjectGuard: subjectGuard(run.structure?.fact?.subject, titleZh),
   };
 }
 
@@ -619,9 +675,11 @@ export async function analyzeArticle(articleId: string, opts: StepOpts = {}): Pr
   if (waitsForPage(input)) return { analysisId: null, stale: false, needsBody: true, output: null, receiptIds: [], reused: true };
   const run = await runAnalysis(input, opts);
   const out = normalizeAnalysis(run);
+  // A failed check left its receipt failed, to be asked again: it is not completed with the judgement.
+  const checked = run.grounding && "receiptId" in run.grounding ? run.grounding : null;
   const receiptIds = [
     ...(run.prefilter ? [run.prefilter.receiptId] : []), ...(run.scores?.receiptIds ?? []), ...(run.writing?.receiptIds ?? []),
-    ...(run.structure ? [run.structure.receiptId] : []),
+    ...(run.structure ? [run.structure.receiptId] : []), ...(checked ? [checked.receiptId] : []),
   ];
   const w = run.writing;
   const detail = {
@@ -629,7 +687,8 @@ export async function analyzeArticle(articleId: string, opts: StepOpts = {}): Pr
     scores: out.scores, scoreAxes: out.scoreAxes, scoreModel: out.scoreModel, threshold: out.threshold, ...(out.scoreRefused ? { scoreRefused: true } : {}),
     ...(w ? { writer: w.kind, writerModel: w.model, itemType: w.itemType ?? null, authorRole: w.authorRole ?? null } : {}),
     ...(w?.identityGuard?.outcome === "fallback" ? { identityGuard: w.identityGuard } : {}),
-    scope: out.scope, fact: out.fact,
+    scope: out.scope, fact: out.fact, subjectGuard: out.subjectGuard,
+    ...(run.grounding ? { grounding: checked ? { model: checked.model, claims: checked.claims } : run.grounding } : {}),
   };
   // A later reprint from another source is told by this fingerprint (editorial/copies.ts).
   const simhash = fingerprint(copyText(input));
@@ -649,6 +708,6 @@ export async function analyzeArticle(articleId: string, opts: StepOpts = {}): Pr
     }
     return { analysisId: row!.id, stale };
   });
-  const reused = (run.prefilter?.reused ?? true) && (run.scores?.reused ?? true) && (w?.reused ?? true) && (run.structure?.reused ?? true);
+  const reused = (run.prefilter?.reused ?? true) && (run.scores?.reused ?? true) && (w?.reused ?? true) && (run.structure?.reused ?? true) && (checked?.reused ?? true);
   return { analysisId: committed.analysisId, stale: committed.stale, output: out, receiptIds, reused };
 }

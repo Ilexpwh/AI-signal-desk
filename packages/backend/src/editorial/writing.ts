@@ -8,6 +8,7 @@ export { isChineseText as looksZh } from "../lib/text.ts";
 import { onlyXArticleLink } from "../sources/x.ts";
 import type { AnalyzeInputArticle } from "./input.ts";
 import { promptText } from "./prompts.ts";
+import { entityIdentity } from "./vocabulary.ts";
 
 export const PREFILTER_SYSTEM = promptText("prefilter");
 export const UNDERSTAND_SYSTEM = promptText("understand");
@@ -205,6 +206,25 @@ export interface IdentityGuard {
   outcome: "pass" | "fallback";
   unsupportedTitleEntityIds: string[];
   unsupportedSummaryEntityIds: string[];
+}
+
+export interface SubjectGuard {
+  outcome: "match" | "mismatch" | "unknown";
+  /** The company the fact is about: its subject as a vocabulary name, else the one company the lexicon finds in it. */
+  factEntity: string | null;
+  titleEntities: string[];
+}
+
+/**
+ * Whether the title names the company its fact is about, by the identity lexicon alone. Unknown when the fact has no single
+ * known company, the title names none, or the lexicon cannot find the fact's company in a title. Only recorded: the copy stands.
+ */
+export function subjectGuard(subject: string | null | undefined, titleZh: string): SubjectGuard {
+  const named = matchEntityIds([subject]);
+  const factEntity = entityIdentity(subject) ?? (named.length === 1 ? named[0]! : null);
+  const titleEntities = matchEntityIds([titleZh]);
+  const outcome = !factEntity || !lexiconName(factEntity) || !titleEntities.length ? "unknown" : titleEntities.includes(factEntity) ? "match" : "mismatch";
+  return { outcome, factEntity, titleEntities };
 }
 
 /**

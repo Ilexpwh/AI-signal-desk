@@ -263,6 +263,12 @@ export interface AdminContentChain {
     id: number; origin: string; model: string | null; prompt_version: string | null; input_revision: number; relevance: string | null; category: string | null;
     score: number | null; selected: boolean | null; title_zh: string | null; reason_zh: string | null; created_at: Timestamp;
     receipts: Array<{ id: number; status: string; service: string; model: string | null; cost: number | null; at: Timestamp }>;
+    /** The copy checks, only recorded: whether the title names the fact's company, and (copy by the content understanding) its claims against the material. */
+    subject_guard: { outcome: "match" | "mismatch" | "unknown"; factEntity: string | null; titleEntities: string[] } | null;
+    grounding:
+      | { model: string; claims: Array<{ part: "title" | "summary"; text: string; verdict: "supported" | "unsupported" | "unclear"; quote: string | null }> }
+      | { failed: string }
+      | null;
   }>;
   publication: AdminPublication | null;
   override: { fields: Record<string, unknown>; visibility: string | null; reason: string | null; version: number; updated_by: string; updated_at: Timestamp } | null;

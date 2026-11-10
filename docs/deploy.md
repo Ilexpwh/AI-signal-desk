@@ -89,6 +89,12 @@ COMPOSE_PROFILES=render
 
 ### 更新
 
+**核对文字，先只记录（AI-signal-desk）**：没有数据库迁移。新增模型步骤“核对文字”（选填的 `VERIFY_MODEL` 可以单独选模型，不填用默认模型）和提示词 `industry/prompts/verify-copy.md`：内容理解写好标题和摘要（入选和接近入选的资料）以后，多一次模型调用，把它们拆成一条条说法逐条对照原文，结果记在判断记录的 `output.grounding`；标题里的公司和事实主体对不对得上由代码比，记在 `output.subjectGuard`。两项都只记录，读者看到的文字不变，核对失败也不影响判断。后台“内容诊断”的每次判断下面列出这两项，信源周报多一行本周的计数，怎么看见 [精选与校准](selection.md#6-核对文字先只记录)。要注意：
+
+- 入选和接近入选的资料每条多一次调用（用 `summarize-*.md` 写的其余资料不核对），用量在后台“模型与评测”的“核对文字”一行。
+- 判断记录的提示词版本（`analyses.prompt_version`）多了 `verify-copy@…` 一段；已有的判断不重算，也不补核对。
+- 自己维护行业包的，合并时把 `verify-copy.md` 带进来，没有它服务启动不了。
+
 **正文提取在 Jina 之前多了两道免费的读法（AI-signal-desk）**：Readability 读不出文章的页面，先用 Defuddle（新依赖 `defuddle` 0.19.6，MIT）再读一次；原文页抓不到或都读不出时，配了 `RENDER_URL` 的先交给自己跑的 Crawl4AI 渲染，最后才用 Jina，见 [用自己的浏览器渲染正文](#用自己的浏览器渲染正文)。没有数据库迁移；不设 `RENDER_URL` 就不会调用渲染服务。只作用于之后抽取的正文，已存的正文不变，升级不批量重新抽取。`docker-compose.yml` 多了一个 `render` 网络，worker 接在上面；不带 `--profile render` 启动时，这个网络上只有 worker。
 
 **主题的“上升中”（AI-signal-desk）**：迁移 `0130` 新建 `topic_trends` 表，照下面的命令更新时 setup 会跑它，不改已有的数据。worker 多了每天 00:20 的定时任务 `topics.trend`：按北京时间的日子数每个主题有多少个事件被 `editorial` 信源报道、占当天全部这类事件的比例，和它前 28 天的平均比，见 [把它改成你的行业](customize.md#2-分类标签和主题industrytaxonomytsindustrytopicsjson)。不调用模型，没有新环境变量。要注意：

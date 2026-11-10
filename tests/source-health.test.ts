@@ -487,3 +487,25 @@ test("the weekly report shows how the week's 精选 and dailies spread over thei
   assert.match(text, /本周精选来自 4 个信源，前三个占 83%，均匀度 0\.90/);
   assert.match(text, /本周 1 期日报的 4 条（含快讯）来自 3 个信源，前三个占 100%，均匀度 0\.95/);
 });
+
+test("the weekly report counts the week's checked copy whose title names another company than its fact, or that claims what the material does not", async () => {
+  const sourceId = await source("copy-checks");
+  const at = new Date(now - 86400_000);
+  const claim = (verdict: string) => ({ part: "summary", text: "一条说法", verdict, quote: null });
+  // Each item's judgements, oldest first: only the current one counts.
+  const items = {
+    mismatch: [{ subjectGuard: { outcome: "mismatch" }, grounding: { model: "m", claims: [claim("supported")] } }],
+    unsupported: [{ subjectGuard: { outcome: "match" }, grounding: { model: "m", claims: [claim("supported"), claim("unsupported")] } }],
+    rewritten: [{ subjectGuard: { outcome: "mismatch" }, grounding: { model: "m", claims: [claim("unsupported")] } }, { subjectGuard: { outcome: "match" }, grounding: { model: "m", claims: [claim("unclear")] } }],
+    failed: [{ subjectGuard: { outcome: "unknown" }, grounding: { failed: "outage" } }],
+    summarized: [{ subjectGuard: { outcome: "mismatch" } }],
+  };
+  for (const [name, outputs] of Object.entries(items)) {
+    const id = `${sourceId}-${name}`;
+    await sql`INSERT INTO articles(id,source_id,identity_key,url,title,discovered_at,timeline_at)
+      VALUES(${id},${sourceId},${`url:${id}`},${`https://example.test/${id}`},${id},${at},${at})`;
+    for (const output of outputs) await sql`INSERT INTO analyses(article_id,input_revision,origin,output) VALUES(${id},1,'model',${sql.json(output)})`;
+  }
+  assert.match(await weekly(), /本周入选和接近入选的 4 条稿子：标题主体和事实对不上 1 条，有原文不支持的说法 1 条，核对失败 1 条/,
+    "copy the cheaper prompts wrote is not checked, so not counted");
+});
