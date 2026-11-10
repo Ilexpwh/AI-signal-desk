@@ -11,7 +11,7 @@ import { closeDb, sql } from "@aihot/backend/db";
 import { detachFromFact, requestRegroup } from "@aihot/backend/events/corrections";
 import { upsertMaterial } from "@aihot/backend/content/materials";
 import { consolidate, linkRelatedStories } from "@aihot/backend/events/consolidate";
-import { groupArticle } from "@aihot/backend/events/group";
+import { AUTO_ATTACH, groupArticle } from "@aihot/backend/events/group";
 import { mergeFactInto, mergeStoryInto } from "@aihot/backend/events/merge";
 import { candidateViews } from "@aihot/backend/events/recall";
 import { stopBoss } from "@aihot/backend/jobs/queue";
@@ -295,6 +295,49 @@ test("an explicit regroup drops the automatic membership and decides again", asy
   assert.equal(memberships.length, 1, "the report has exactly one membership after the regroup");
   const signals = await sql<{ story_id: number }[]>`SELECT story_id FROM story_signals WHERE article_id = ${id}`;
   assert.deepEqual(signals.map((s) => Number(s.story_id)), [storyId]);
+});
+
+test("a clear match about the same company joins its fact without the judge once a site sets the thresholds", async () => {
+  hold = gate();
+  hold.open();
+  const title = randomText();
+  const summary = randomText();
+  const { fact, story } = await newFact();
+  await sql`UPDATE facts SET subject = 'OpenAI' WHERE id = ${fact}`;
+  await sql`INSERT INTO fact_articles (fact_id, article_id, role) VALUES (${fact}, ${await report(randomText(), title, summary)}, 'report')`;
+  const telling = async (subject: string, text = title) => {
+    const id = await report(randomText(), text, summary);
+    await setScope(id, "single", { title: text, subject, action: "发布", object: "模型" });
+    return id;
+  };
+  const judged = async (id: string) => {
+    const hits = provider.hits();
+    const result = await groupArticle(id);
+    return { verdict: result.verdict, calls: provider.hits() - hits };
+  };
+
+  assert.deepEqual(await judged(await telling("OpenAI")), { verdict: "same-fact", calls: 1 }, "off until a site sets it");
+  const saved = { ...AUTO_ATTACH };
+  Object.assign(AUTO_ATTACH, { cosine: 0.9, margin: 0.1 });
+  try {
+    const id = await telling("OpenAI");
+    const hits = provider.hits();
+    const result = await groupArticle(id);
+    assert.deepEqual([result.verdict, result.factId, result.storyId], ["auto", fact, story]);
+    assert.equal(provider.hits(), hits, "neither the judge nor the review model is asked");
+    const [decision] = await sql<{ verdict: string; fact_id: number; receipt_id: number | null }[]>`SELECT verdict, fact_id, receipt_id FROM grouping_decisions WHERE article_id = ${id}`;
+    assert.deepEqual([decision!.verdict, Number(decision!.fact_id), decision!.receipt_id], ["auto", fact, null]);
+    assert.equal((await sql`SELECT 1 FROM story_signals WHERE story_id = ${story} AND article_id = ${id}`).length, 1, "it counts for heat");
+
+    assert.deepEqual(await judged(await telling("Anthropic")), { verdict: "same-fact", calls: 1 }, "another company's report is judged");
+    // A second fact told in nearly the same words: the nearest is not clearly ahead.
+    const twin = await newFact();
+    await sql`UPDATE facts SET subject = 'OpenAI' WHERE id = ${twin.fact}`;
+    await sql`INSERT INTO fact_articles (fact_id, article_id, role) VALUES (${twin.fact}, ${await report(randomText(), `${title}${randomText().slice(0, 1)}`, summary)}, 'report')`;
+    assert.equal((await judged(await telling("OpenAI"))).calls, 1, "within the margin of another fact, the judge decides");
+  } finally {
+    Object.assign(AUTO_ATTACH, saved);
+  }
 });
 
 test("a development attaches to the story's earliest fact that still holds reports", async () => {

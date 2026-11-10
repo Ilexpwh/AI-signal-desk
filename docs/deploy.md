@@ -110,6 +110,8 @@ COMPOSE_PROFILES=render
 - 后台“内容诊断”里转载标着“转载”并链到原文；认错的点“重新评估”，按它自己的全文重判。编辑撤回或修改了原文，转了它的资料自动回到队列重新判断，不再沿用这篇原文的判断，通常会多几次模型调用。
 - 指纹距离和最短字数是起始值（`3` 位、`200` 字），上线后用 `scripts/eval-copies.ts` 按 [精选与校准](selection.md#5-认转载校准指纹距离和最短字数) 校准。
 
+**明显的同一件事可以不问模型（AI-signal-desk）**：没有数据库迁移，没有新环境变量，默认关闭，升级后归组和原来一样。要打开，先攒几周归组记录，用 `scripts/eval-recall-thresholds.ts` 选门槛，再把数字写进 `packages/backend/src/events/group.ts` 的 `AUTO_ATTACH`，见 [事件归组](grouping.md#明显的同一件事不问模型)。打开后这样归的报道在后台“内容诊断”的归组记录里是 `auto`，没有模型回执。
+
 **评分改为五个维度（AI-signal-desk）**：评分模型不再自己算总分，改为输出内容类型、五个维度（0–10）和 `thin`，总分由 `industry/selection.ts` 新增的 `weights`（每个内容类型一行权重，和原来提示词里的权重表相同）与 `thinCap` 合成。没有数据库迁移，没有新环境变量；已经判过的资料不会重算，之后的新资料按新格式评分，五个维度存在判断记录的 `output.scoreAxes` 里。要注意：
 
 - **自己改过 `industry/prompts/selection-score.md` 的**，合并时把输出改成新的七个字段（见示范提示词末尾），并把权重表搬到 `industry/selection.ts` 的 `weights`；还在输出 `attentionScore` 的提示词会让每次评分都因格式不对而失败。

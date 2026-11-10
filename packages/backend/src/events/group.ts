@@ -5,7 +5,8 @@
 // Identity: one four-way relation judgement over the candidate
 // facts with their representative reports fully described (relate.ts); a merge that is not obvious
 // from similarity is confirmed by a second vendor before it is written; a development attaches only
-// to the fact that started its story, so stories do not grow by chaining. Manual corrections
+// to the fact that started its story, so stories do not grow by chaining. A site that has calibrated it
+// lets a clear match about the same company join without the judgement (AUTO_ATTACH). Manual corrections
 // (corrections.ts) are never overwritten; a revision keeps its membership unless an editor asks for a regroup or its
 // structure identifies it as composite. Composite material only mentions facts, never starts or
 // joins a fact/story and never supplies a root or bridge. When a
@@ -38,14 +39,21 @@ import { mergeFactInto, mergeStoryInto } from "./merge.ts";
 import { bestPerFact, candidateViews, cosine32, recallFacts, recallFactsByPosts, recallSelectedBackground, relatedPosts, vectorsFor, type Recalled, type CardRow } from "./recall.ts";
 import {
   BATCH_SYSTEM, BATCH_PROMPT_VERSION, BatchSchema, PAIR_SYSTEM, PairSchema, RELATE_PROMPT_VERSION, SIGNAL_SYSTEM, SignalSchema, TIE_MIN_CONFIDENCE,
-  batchUser, completeDecisions, firmlyTied, pairUser, reportText, sameOccurrence, signalTarget, signalText, storyForDevelopment, verdictsByFact,
+  batchUser, completeDecisions, firmlyTied, pairUser, reportText, sameOccurrence, sameSubject, signalTarget, signalText, storyForDevelopment, verdictsByFact,
   type CandidateView, type ReadingContext, type Relation, type ReportView, type SelectionValue, type Verdict,
 } from "./relate.ts";
 
-const RECALL_MIN_COSINE = 0.6;
+export const RECALL_MIN_COSINE = 0.6;
 const RECALL_TOP_FACTS = 10;
 /** A merge with a candidate less similar than this is confirmed by the review model before it is written. */
-const CONFIRM_BELOW_COSINE = 0.85;
+export const CONFIRM_BELOW_COSINE = 0.85;
+/**
+ * A report at least `cosine` close to its nearest fact, `margin` ahead of the next one, whose subject is
+ * the same company (relate.ts sameSubject), joins that fact without the judge (verdict "auto"; autoAttach).
+ * Off until a site sets both from its own judged reports (scripts/eval-recall-thresholds.ts,
+ * docs/grouping.md); never below CONFIRM_BELOW_COSINE. Embedding scores only.
+ */
+export const AUTO_ATTACH = { cosine: Infinity, margin: 0.05 };
 /** Discussion posts are judged only against clear candidates, and attach without a call when nearly identical to a report. */
 const SIGNAL_MIN_COSINE = 0.72;
 const SIGNAL_AUTO_COSINE = 0.92;
@@ -87,6 +95,21 @@ function participantKey(source: { id: string; signal_group_id: string | null }):
 // Judgement
 
 const NO_SELECTED_COVERAGE: SelectionValue = { addsValue: true, reason: "没有已公开精选的相关报道" };
+
+/**
+ * The nearest fact, when it is a clear match the judge need not be asked about (AUTO_ATTACH). A recalled
+ * post is scored without a cosine and never qualifies. The judge also answers whether the report adds to
+ * what 精选 already shows; only the joined fact's own selected report (decide gives it the representative
+ * slot) or nothing selected at all leaves that answer known without it.
+ */
+function autoAttach(cands: CandidateView[], reading: ReadingContext[], subject: string | null | undefined, recalledPosts: Set<number>): CandidateView | null {
+  const [top, next] = cands;
+  if (!top || !embeddingsAvailable() || recalledPosts.has(top.factId)) return null;
+  if (top.score < Math.max(AUTO_ATTACH.cosine, CONFIRM_BELOW_COSINE) || top.score - (next?.score ?? RECALL_MIN_COSINE) < AUTO_ATTACH.margin) return null;
+  if (!sameSubject(subject, top.report.frame?.subject)) return null;
+  if (!top.selected && (reading.length || cands.some((c) => c.selected))) return null;
+  return top;
+}
 
 async function judgeBatch(articleId: string, query: ReportView, cands: CandidateView[], reading: ReadingContext[]): Promise<{ verdicts: Map<number, Verdict>; selection: SelectionValue; receiptId: number }> {
   const res = await chatJson({
@@ -222,7 +245,7 @@ async function markGrouped(articleId: string, revision: number, selection?: Sele
 export interface GroupResult {
   verdict:
     | "same-fact" | "same-card" | "same-url" | "new-fact-in-story" | "new-story" | "roundup" | "kept" | "standalone" | "manual" | "skipped"
-    | "copy" | "signal" | "signal-native" | "signal-unmatched" | "historical";
+    | "auto" | "copy" | "signal" | "signal-native" | "signal-unmatched" | "historical";
   factId?: number;
   storyId?: number;
   /** Stories compared because this report tied them together (see consolidate). */
@@ -391,10 +414,12 @@ async function decide(articleId: string, opts: GroupOptions, revision: number, r
   const cands = selectedSameUrl ? [] : await candidateViews(await recallFacts(articleId,
     reportText(title, an.summary_zh), RECALL_MIN_COSINE, RECALL_TOP_FACTS, [...referenced, ...(sameUrl ? [sameUrl] : [])]));
   const reading = selectedSameUrl ? [] : await recallSelectedBackground(articleId, reportText(title, an.summary_zh), RECALL_MIN_COSINE, cands.map(c => c.factId));
+  // A composite, a revision and the same URL are decided below without a nearest fact to join.
+  const auto = composite || kept || sameUrl ? null : autoAttach(cands, reading, frame?.subject, new Set(referenced.map((r) => r.fact_id)));
   let verdicts = new Map<number, Verdict>();
   let selection = NO_SELECTED_COVERAGE;
   const receipts: number[] = [];
-  if (cands.length || reading.length) {
+  if (!auto && (cands.length || reading.length)) {
     const judged = await judgeBatch(articleId, { ...query, sourceText: a.body_text }, cands, reading);
     verdicts = judged.verdicts;
     selection = judged.selection;
@@ -453,6 +478,10 @@ async function decide(articleId: string, opts: GroupOptions, revision: number, r
     verdict = "same-url";
     factId = sameUrl.fact_id;
     storyId = sameUrl.story_id;
+  } else if (auto) {
+    verdict = "auto";
+    factId = auto.factId;
+    storyId = auto.storyId;
   } else {
     if (cands.length) {
       for (const pick of sameOccurrence(cands, verdicts)) {
@@ -492,7 +521,7 @@ async function decide(articleId: string, opts: GroupOptions, revision: number, r
   if (sameUrl) decisionCandidates.push({ id: sameUrl.fact_id, score: 1, relation: "SAME_OCCURRENCE", confidence: 1 });
   // Only a fact already shown in selected has a representative slot to replace. A duplicate of
   // an unselected fact must retain the value judgement, including a prior low-increment rejection.
-  if ((verdict === "same-fact" || verdict === "same-url") && (selectedSameUrl || cands.some(c => c.factId === factId && c.selected))) {
+  if ((verdict === "same-fact" || verdict === "same-url" || verdict === "auto") && (selectedSameUrl || cands.some(c => c.factId === factId && c.selected))) {
     selection = { addsValue: true, reason: "同一新闻的代表报道候选" };
   }
 
