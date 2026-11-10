@@ -10,6 +10,7 @@ import { loadGroupReports } from "@aihot/backend/publication/groups";
 import { loadItemDetail } from "@aihot/backend/publication/detail";
 import { loadStoryDetail, v1HotTopics, v1Story } from "@aihot/backend/publication/stories";
 import { candidates } from "@aihot/backend/reports/edition";
+import { beijingDate } from "@aihot/contracts/time";
 import { composeStoryDigest, DIGEST_PROMPT_VERSION, DIGEST_SYSTEM, DigestSchema } from "@aihot/backend/events/digest";
 import { chatJson } from "@aihot/backend/providers/llm";
 import { computeHotRanking } from "@aihot/backend/events/hot";
@@ -304,7 +305,7 @@ test("a digest publishes only the sentences its cited reports support, each with
     { text: DIGEST[0]!, reports: [quota] },
     { text: "这句没有标出处。", reports: [] },
     { text: "这句引用了请求里没有的报道。", reports: [`${key}-unlisted`] },
-    { text: "Dots 于 11 月 8 日开放订阅。", reports: [quota], newParagraph: true },
+    { text: "Dots 于 2 月 30 日开放订阅。", reports: [quota], newParagraph: true },
     { text: supported, reports: [price] },
     { text: supported, reports: [quota, price] },
     { text: DIGEST[1]!, reports: [price], newParagraph: true },
@@ -326,7 +327,7 @@ test("a digest publishes only the sentences its cited reports support, each with
   assert.equal(site.digestSentences![0]!.cites[0]!.title, "Dots 每月提供 500 次自主任务额度");
 });
 
-test("a digest too short once its unsupported sentences are dropped keeps the previous version, or the story has none", async () => {
+test("a digest too short once its unsupported sentences are dropped keeps the previous version, or the story has none; a whole one is published however short", async () => {
   const s = await source("digest-short", "T1");
   const g = await story();
   await report(s, g, { title: "Dots 正式发布", hours: 3 });
@@ -348,6 +349,15 @@ test("a digest too short once its unsupported sentences are dropped keeps the pr
     assert.deepEqual([page.digest, page.digestSentences], [null, null]);
     assert.equal(page.excerpt?.text, "Dots 上架应用商店", "the story opens with its report's summary, as without a digest");
     assert.equal((await sql`SELECT 1 FROM story_digests WHERE story_id=${fresh.storyId}`).length, 0);
+
+    // A thin story's short digest, nothing dropped from it: published as before. The date it gives is its report's.
+    const thin = await story();
+    const opened = await report(s, thin, { title: "Dots 开放下载", hours: 1 });
+    const [, month, day] = beijingDate(at(1)).split("-").map(Number);
+    const dated = `${month} 月 ${day} 日，Dots 开放下载。`;
+    digestAnswer = () => [{ text: dated, reports: [opened] }];
+    assert.equal((await composeStoryDigest(thin.storyId)).updated, true);
+    assert.equal((await loadStoryDetail(thin.storyId, now))!.digest, dated);
   } finally { digestAnswer = null; }
 });
 

@@ -29,7 +29,11 @@ export const DigestSchema = z.object({
 /** Sampling of every digest request. */
 export const DIGEST_SAMPLING = { temperature: 0.3, maxTokens: 1200 };
 
-/** Shorter than this once its unsupported sentences are dropped, a digest is not published: the previous version stays, or the story has none. */
+/**
+ * Shorter than this once the checks dropped some of its sentences, a digest is not published: the previous
+ * version stays, or the story has none. One the checks left whole is published at any length, as the prompt
+ * lets a thin story's be short (publishable).
+ */
 export const DIGEST_MIN_CHARS = 100;
 
 /** Oldest first; reports from the same moment keep the order digestReports returned them in. */
@@ -67,10 +71,14 @@ export function buildStoryDigestInput(story: { title: string; digest: string | n
 /** Why a sentence is not published: it cites nothing, cites a report its request did not list, or names what its reports do not. */
 export type DroppedReason = "uncited" | "unlisted" | "unsupported";
 
-/** What a sentence may take from a report it cites: the report's title, summary and source, and its fact's evidence. */
+/**
+ * What a sentence may take from a report it cites: the report's title, summary, source and date (the request
+ * lists each report with its date), and its fact's evidence. Not its clock time: hours and minutes would
+ * vouch for almost any small number.
+ */
 function citable(r: Report): string {
   const e = digestFactEvidence(r);
-  return [r.title, r.summary, r.source_name, e.subject, e.action, e.object, e.conditions, e.evidence, e.extractedEvidence,
+  return [r.title, r.summary, r.source_name, beijingDate(r.at), e.subject, e.action, e.object, e.conditions, e.evidence, e.extractedEvidence,
     ...e.extractedConditions.flatMap((c) => [c.text, c.quote])].filter(Boolean).join("\n");
 }
 
@@ -106,6 +114,11 @@ export function citedSentences(sentences: DigestSentence[], listed: Report[]): {
     opens = false;
   }
   return { kept, dropped };
+}
+
+/** Whether the site publishes the kept sentences: some are left, and they are long enough if the checks dropped any (DIGEST_MIN_CHARS). */
+export function publishable(kept: DigestSentence[], dropped: unknown[]): boolean {
+  return kept.length > 0 && (dropped.length === 0 || [...digestText(kept)].length >= DIGEST_MIN_CHARS);
 }
 
 /** The digest every reader gets: its sentences in order, a blank line between paragraphs. */
@@ -163,9 +176,9 @@ export async function composeStoryDigest(storyId: number, opts: { rewrite?: bool
       model: await modelFor("digest"), purpose: "story_digest", subject: `story:${storyId}@${ids.length}`, promptVersion: DIGEST_PROMPT_VERSION,
       system: DIGEST_SYSTEM, user, schema: DigestSchema, ...DIGEST_SAMPLING,
     });
-    const { kept } = citedSentences(res.data.sentences, listedReports(reports).listed);
+    const { kept, dropped: unsupported } = citedSentences(res.data.sentences, listedReports(reports).listed);
     const digest = digestText(kept);
-    if ([...digest].length < DIGEST_MIN_CHARS) {
+    if (!publishable(kept, unsupported)) {
       // The answer stays reusable: the same request is not paid for again.
       if (res.receiptId !== null) await completeReceipt(sql, res.receiptId);
       return { updated: false, tooShort: true };

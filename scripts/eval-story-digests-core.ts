@@ -3,7 +3,7 @@
 // publish of an answer; and the comparison a run writes, as Markdown for reading.
 import { z } from "zod";
 import { beijingDate, beijingTime } from "@aihot/contracts/time";
-import { byReportTime, citedSentences, DIGEST_MIN_CHARS, digestText, listedReports, type DroppedReason } from "@aihot/backend/events/digest";
+import { byReportTime, citedSentences, DIGEST_MIN_CHARS, digestText, listedReports, publishable, type DroppedReason } from "@aihot/backend/events/digest";
 import type { DigestReport, DigestSentence } from "@aihot/backend/publication/story-evidence";
 import { parseCasesJsonl } from "./eval-tools.ts";
 
@@ -115,7 +115,7 @@ export function inputForm(row: DigestEvalCase): string {
 export function publishedOf(row: DigestEvalCase, sentences: DigestSentence[]) {
   const { kept, dropped } = citedSentences(sentences, listedReports(toDigestInput(row).reports).listed);
   const digest = digestText(kept);
-  return { kept, dropped, digest, published: [...digest].length >= DIGEST_MIN_CHARS };
+  return { kept, dropped, digest, published: publishable(kept, dropped) };
 }
 
 export interface DigestCall {
@@ -126,7 +126,7 @@ export interface DigestCall {
   dropped: Array<DigestSentence & { reason: DroppedReason }> | null;
   /** The kept sentences joined: the digest readers would get. */
   digest: string | null;
-  /** Long enough to publish (DIGEST_MIN_CHARS); otherwise the event keeps its previous digest, or has none. */
+  /** Publishable (events/digest.ts publishable); otherwise the event keeps its previous digest, or has none. */
   published: boolean;
   receiptId: number | null;
   reused: boolean;
