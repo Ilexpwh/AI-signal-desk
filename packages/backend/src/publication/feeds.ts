@@ -2,7 +2,7 @@
 // publication time (none when it is unknown). Summary feeds never carry content:encoded; full feeds
 // inline bodies only for sources that explicitly allow redistribution. Titles come from the site's
 // name and categories.
-import { feedCategoryLabel, PUBLIC_API_CATEGORY_KEYS, toPublicApiCategory, type PublicApiCategoryKey } from "@aihot/contracts/taxonomy";
+import { categoryIptc, feedCategoryLabel, IPTC_MEDIA_TOPICS, PUBLIC_API_CATEGORY_KEYS, toPublicApiCategory, type PublicApiCategoryKey } from "@aihot/contracts/taxonomy";
 import { EDITION_WHEN, FEED_COPY, REPORTS, SITE, subjectAfter } from "@aihot/site";
 import { config } from "../config.ts";
 import { sql } from "../db.ts";
@@ -125,7 +125,9 @@ function itemXml(r: FeedRow, includeContent: boolean): string {
   const summary = r.summary ?? "";
   const description = `<p>${escapeXml(summary)}</p>\n<p>🔗 <a href="${escapeXml(r.url)}">阅读原文</a></p>\n<p>via ${escapeXml(SITE.name)} · <a href="${aihot}">${aihot}</a></p>`;
   const publicCategory = toPublicApiCategory(r.category);
-  const category = publicCategory ? `\n      <category>${escapeXml(feedCategoryLabel(publicCategory))}</category>` : "";
+  const iptc = categoryIptc(publicCategory);
+  const category = (publicCategory ? `\n      <category>${escapeXml(feedCategoryLabel(publicCategory))}</category>` : "")
+    + (iptc ? `\n      <category domain="${IPTC_MEDIA_TOPICS}">${escapeXml(iptc.code)}</category>` : "");
   let content = "";
   if (includeContent && r.syndicate) {
     const html = fullContent(r, aihot);

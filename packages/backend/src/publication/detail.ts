@@ -1,5 +1,6 @@
 // Item detail and Markdown export, both behind the same visibility and licence rules.
-import type { OutlineEntry, SiteItemDetail, StoryRef } from "@aihot/contracts/site";
+import type { MentionTarget } from "@aihot/contracts/mentions";
+import type { EntityRef, OutlineEntry, SiteItemDetail, StoryRef } from "@aihot/contracts/site";
 import { ITEM_COPY, SITE } from "@aihot/site";
 import { bodyToMarkdown } from "../content/markdown.ts";
 import { withCover, type Cover } from "../content/cover.ts";
@@ -12,9 +13,10 @@ import { eventPageCondition, exportTranslation, isChineseBody, ITEM_COLUMNS, ITE
 import { coverageCondition } from "./scope.ts";
 import { itemUrl, siteUrl } from "./links.ts";
 import { hasItemPage, publicSourceName } from "./rules.ts";
-import { tagTopics, topicLinks, topicMembership } from "./topics.ts";
+import { tagTopics, topicLinks, topicMembership, TOPICS } from "./topics.ts";
 import { firstDaily } from "./reports.ts";
 import { mentionsIn } from "./mentions.ts";
+import { ENTITIES } from "../editorial/vocabulary.ts";
 
 interface DetailRow extends ItemRow {
   /** A post's long X Article as its page shows it (xArticleHtml); lists leave it out. */
@@ -34,6 +36,20 @@ interface DetailRow extends ItemRow {
 export type DetailResult =
   | { kind: "found"; item: SiteItemDetail; row: DetailRow }
   | { kind: "not_found" };
+
+/**
+ * The companies a report is about, by its subject tags (entity:<id>), and the others its summary names, by the
+ * company topics the summary links (mentions.ts); each with the Wikidata item the vocabulary maps it to.
+ */
+function itemEntities(tags: string[], mentions: MentionTarget[]): SiteItemDetail["entities"] {
+  const ref = (id: string): EntityRef[] => {
+    const e = ENTITIES[id];
+    return e ? [{ id, name: e.name, wikidata: e.wikidata ?? null }] : [];
+  };
+  const about = [...new Set(tags.filter((t) => t.startsWith("entity:")).map((t) => t.slice("entity:".length)))];
+  const named = mentions.flatMap((m) => TOPICS.find((t) => t.entityId && m.href === `/topics/${t.slug}`)?.entityId ?? []);
+  return { about: about.flatMap(ref), mentions: [...new Set(named)].filter((id) => !about.includes(id)).flatMap(ref) };
+}
 
 /** Adds stable ids to h2–h4 and returns the outline. */
 function withOutline(html: string): { html: string; outline: OutlineEntry[] } {
@@ -117,6 +133,7 @@ export async function loadItemDetail(id: string, language: "zh" | "original" = "
       hasTranslation: false,
       bodyLanguage: "original",
       mentions: await mentionsIn([summary.summary]),
+      entities: { about: [], mentions: [] },
     };
     return { kind: "found", item, row };
   }
@@ -184,6 +201,7 @@ export async function loadItemDetail(id: string, language: "zh" | "original" = "
 
   // The reason goes with the seat; a report yielding it points to the one holding it.
   const sameEvent = (await seatHolders([row], now)).get(row.id) ?? null;
+  const mentions = await mentionsIn([summary.summary]);
   const item: SiteItemDetail = {
     ...summary,
     x,
@@ -202,7 +220,8 @@ export async function loadItemDetail(id: string, language: "zh" | "original" = "
     group,
     hasTranslation: reading.hasTranslation,
     bodyLanguage: reading.bodyLanguage,
-    mentions: await mentionsIn([summary.summary]),
+    mentions,
+    entities: itemEntities(row.tags, mentions),
   };
   return { kind: "found", item, row };
 }

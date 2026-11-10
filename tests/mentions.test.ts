@@ -1,6 +1,7 @@
 // The site's own texts link the names of pages it has (contracts/mentions.ts): an article page, an event
 // page and a report are sent the pages their texts name. Company topics are the engine's own; other pages,
-// such as a model's, come from the installed modules, so a site without them still links its companies.
+// such as a model's, come from the installed modules, so a site without them still links its companies. An
+// article page also names the companies it is about and mentions, by their Wikidata items where mapped.
 // Failure cases: a page a module offers is not sent; a site without modules sends a module's pages or none.
 import { tag } from "./setup.ts";
 import assert from "node:assert/strict";
@@ -14,6 +15,7 @@ import { loadItemDetail } from "@aihot/backend/publication/detail";
 import { loadStoryDetail } from "@aihot/backend/publication/stories";
 import { loadReport } from "@aihot/backend/publication/reports";
 import { stopBoss } from "@aihot/backend/jobs/queue";
+import { ENTITIES } from "@aihot/industry/taxonomy";
 
 const T = tag();
 const source = `mentions-${T}`;
@@ -27,12 +29,12 @@ before(async () => {
 });
 after(async () => { installModules([]); await stopBoss(); await closeDb(); });
 
-async function article(title: string, summary: string) {
+async function article(title: string, summary: string, subjects: string[] = []) {
   const { articleId } = await upsertMaterial({ sourceId: source, url: `https://example.com/${T}/${++sequence}`, title,
     bodyText: "Fixture body", bodyHtml: "<p>Fixture body</p>", bodyStatus: "ok", via: "fetch", publishedAt: at });
   await sql`UPDATE articles SET grouping_status = 'complete' WHERE id = ${articleId}`;
-  await sql`INSERT INTO analyses (article_id, input_revision, origin, relevance, category, title_zh, summary_zh, score, selected)
-    VALUES (${articleId}, 1, 'rule', 'pass', 'industry', ${title}, ${summary}, 90, true)`;
+  await sql`INSERT INTO analyses (article_id, input_revision, origin, relevance, category, subjects, title_zh, summary_zh, score, selected)
+    VALUES (${articleId}, 1, 'rule', 'pass', 'industry', ${subjects}, ${title}, ${summary}, 90, true)`;
   await publishArticle(articleId, { releasedAt: at });
   return articleId;
 }
@@ -54,6 +56,25 @@ test("an article page is sent the pages its summary names: the module's and the 
     { href: "/topics/openai", names: ["OpenAI"] },
     { href: "/models/dots-2", names: ["Dots 2"] },
   ]);
+});
+
+// Search engines read these as the article's about and mentions; a company the site mapped to a Wikidata item
+// says which company it is.
+test("an article page names the companies it is about and the other companies its summary names", async () => {
+  installModules([]);
+  const id = await article("Anthropic 发布新模型", "Anthropic 发布新模型，对标 OpenAI 的产品。", ["anthropic"]);
+  const anthropic = ENTITIES.anthropic!;
+  anthropic.wikidata = "Q42";
+  try {
+    const found = await loadItemDetail(id);
+    if (found.kind !== "found") return assert.fail("article missing");
+    assert.deepEqual(found.item.entities, {
+      about: [{ id: "anthropic", name: anthropic.name, wikidata: "Q42" }],
+      mentions: [{ id: "openai", name: ENTITIES.openai!.name, wikidata: null }],
+    }, "its subject is not mentioned again; a company without an item has none");
+  } finally {
+    delete anthropic.wikidata;
+  }
 });
 
 test("an event page is sent the pages its overview names", async () => {

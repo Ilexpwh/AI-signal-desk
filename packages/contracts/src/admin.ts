@@ -210,6 +210,24 @@ export interface AdminContentSearch {
   rows: AdminContentRow[];
 }
 
+/** A fact subject the vocabulary does not know (industry/taxonomy.ts ENTITIES), as the structure step wrote it. */
+export interface AdminUnmatchedSubject {
+  name: string;
+  /** Articles discovered in the window whose latest analysis named it. */
+  count: number;
+  last_seen_at: Timestamp;
+  latest_article_id: string;
+  /** The identity lexicon's companies (IDENTITY_LEXICON) it reads in the name: often a company that lacks this alias. */
+  lexicon: string[];
+}
+
+/** 未收录主体: the names named in at least `min` articles over the last `days`, most often first. */
+export interface AdminUnmatchedSubjects {
+  days: number;
+  min: number;
+  rows: AdminUnmatchedSubject[];
+}
+
 /** The publications row of an item, as the publish step wrote it. */
 export interface AdminPublication {
   article_id: string;

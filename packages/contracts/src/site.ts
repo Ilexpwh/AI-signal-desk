@@ -60,6 +60,14 @@ export interface StoryRef {
   title: string;
 }
 
+/** A company of the site's vocabulary (industry/taxonomy.ts ENTITIES), and its Wikidata item when the site mapped one. */
+export interface EntityRef {
+  id: string;
+  name: string;
+  /** A Wikidata item id ("Q…"). */
+  wikidata: string | null;
+}
+
 /** What every site answer about an article carries; a card and a page each add the X post in their own form. */
 export interface ItemSummary {
   id: string;
@@ -183,6 +191,8 @@ export interface SiteItemDetail extends ItemSummary {
   bodyLanguage: "zh" | "original";
   /** The pages its summary names (mentions.ts). */
   mentions: MentionTarget[];
+  /** The companies it is about (its subjects), and the other companies its summary names (by their topic pages). */
+  entities: { about: EntityRef[]; mentions: EntityRef[] };
 }
 
 /** A fact's public reports under the list's filters: what "另外 N 家也报道了" opens. */

@@ -1,5 +1,5 @@
 // v1 items and the selected sync (snapshot + changes), read from the same public read layer.
-import type { PublicApiCategoryKey } from "@aihot/contracts/taxonomy";
+import { categoryIptc, type PublicApiCategoryKey } from "@aihot/contracts/taxonomy";
 import { sql, type Db } from "../db.ts";
 import { decodeCursor, encodeCursor, InvalidCursorError, queryBinding } from "../lib/cursor.ts";
 import { newShortId } from "../lib/ids.ts";
@@ -27,11 +27,20 @@ export interface V1ItemsResult {
 }
 
 export function rowToV1(row: ApiItemRow): V1ItemPayload {
-  return v1Payload({
+  return withIptc(v1Payload({
     articleId: row.id, title: row.title, originalTitle: row.original_title, summary: row.summary, sourceName: row.source_name,
     url: row.url, publishedAt: row.published_at, discoveredAt: row.discovered_at, category: row.category,
     score: row.score === null ? null : Number(row.score), selected: row.selected, reason: row.reason,
-  });
+  }));
+}
+
+/**
+ * An item with its category's IPTC media topic, when the site maps one (industry/taxonomy.ts). Added as it is
+ * read, so the selected ledger's stored payloads carry it too, and a changed mapping holds for every item at once.
+ */
+function withIptc(item: V1ItemPayload): V1ItemPayload {
+  const iptc = categoryIptc(item.category);
+  return iptc ? { ...item, iptc } : item;
 }
 
 /** Search callers across HTTP and tools share one read. */
@@ -188,7 +197,7 @@ export async function selectedSnapshot(q: SnapshotQuery, now = new Date()) {
     count: page.length,
     hasMore,
     nextPage: hasMore && last ? encodeCursor(SYNC_PREFIX, { k: "page", e: epoch, w, f: fields, a: last.article_id, t: asOf }) : null,
-    items: page.map((r) => (fields === "minimal" ? minimalOf(r.payload) : r.payload)),
+    items: page.map((r) => (fields === "minimal" ? minimalOf(r.payload) : withIptc(r.payload))),
   };
 }
 
@@ -225,7 +234,7 @@ export async function selectedChanges(q: { cursor: string; limit: number }, now 
     changes: page.map((r) =>
       r.op === "remove"
         ? { op: "remove" as const, changedAt: r.changed_at.toISOString(), id: r.article_id }
-        : { op: "upsert" as const, changedAt: r.changed_at.toISOString(), item: c.f === "minimal" ? minimalOf(r.payload!) : r.payload! },
+        : { op: "upsert" as const, changedAt: r.changed_at.toISOString(), item: c.f === "minimal" ? minimalOf(r.payload!) : withIptc(r.payload!) },
     ),
   };
 }

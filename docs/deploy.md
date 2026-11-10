@@ -89,6 +89,13 @@ COMPOSE_PROFILES=render
 
 ### 更新
 
+**未收录主体、Wikidata 和 IPTC（AI-signal-desk）**：没有数据库迁移，没有新环境变量，不调用模型，已存的数据不用改。说明见 [把它改成你的行业](customize.md#2-分类标签和主题industrytaxonomytsindustrytopicsjson)。要注意：
+
+- **未收录主体**：之后的判断把事实主体里对不上 `ENTITIES` 的名字记在 `output.unmatchedSubjects`；后台“内容诊断”页不输入搜索词时列出近 30 天出现 3 篇以上的。升级前判过的资料没有这项，列表要随新资料慢慢攒起来。
+- **`industry/taxonomy.ts` 多了两个选填字段**：`ENTITIES` 的 `wikidata`（`"Q…"`）和 `CATEGORIES` 的 `iptc`（`{ code, label }`）。示范包两项都没填，不填时网站、接口和 RSS 都和原来一样。自己改过这个文件的不用补。新脚本 `scripts/wikidata-entities.ts` 只打印候选，不改文件。
+- **文章页的结构化数据**多了 `about`（主体公司）和 `mentions`（摘要提到的其他公司），填了 `wikidata` 的带 `sameAs`。网站接口 `/api/site/items/<id>` 多了 `entities`。
+- **公开接口只加字段**：填了 `iptc` 的类别，`/api/v1/items`、精选快照和变更（默认字段）以及 MCP 的最新、搜索结果，每条多一个 `iptc`；RSS 每条多一个 domain 是 `http://cv.iptc.org/newscodes/mediatopic/` 的 `<category>`。`interfaceVersion` 不变，OpenAPI 已同步。
+
 **核对文字，先只记录（AI-signal-desk）**：没有数据库迁移。新增模型步骤“核对文字”（选填的 `VERIFY_MODEL` 可以单独选模型，不填用默认模型）和提示词 `industry/prompts/verify-copy.md`：内容理解写好标题和摘要（入选和接近入选的资料）以后，多一次模型调用，把它们拆成一条条说法逐条对照原文，结果记在判断记录的 `output.grounding`；标题里的公司和事实主体对不对得上由代码比，记在 `output.subjectGuard`。两项都只记录，读者看到的文字不变，核对失败也不影响判断。后台“内容诊断”的每次判断下面列出这两项，信源周报多一行本周的计数，怎么看见 [精选与校准](selection.md#6-核对文字先只记录)。要注意：
 
 - 入选和接近入选的资料每条多一次调用（用 `summarize-*.md` 写的其余资料不核对），用量在后台“模型与评测”的“核对文字”一行。

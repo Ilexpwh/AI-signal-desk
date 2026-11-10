@@ -105,6 +105,8 @@ export interface V1ItemPayload {
   selected: boolean;
   reason: string | null;
   attribution: { name: string; url: string };
+  /** The category's IPTC media topic, when the site maps one: added as v1 reads it (v1.ts withIptc), never stored in the ledger. */
+  iptc?: { code: string; label: string };
 }
 
 export interface PublishOptions {

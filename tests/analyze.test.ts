@@ -133,6 +133,7 @@ test("a selected item: prefilter, two scores, the content understanding and the 
   assert.deepEqual([r.output.writer, r.output.itemType, r.output.prefilter.label, r.output.fact.title], ["understand", "model_release", "PASS", "事实 CLEAR"]);
   assert.equal(r.output.scope, "single");
   assert.equal(r.output.fact.evidence, "a lab released a model");
+  assert.deepEqual(r.output.unmatchedSubjects, ["某公司"], "a fact subject the company list does not know is kept for the admin");
   assert.deepEqual(r.output.scoreAxes.map(weighedScore), r.output.scores, "each call's type and axes are kept, and weigh to its score");
   const score = requests.find((q) => q.marker === "CLEAR" && q.step === "score")!;
   assert.match(score.user, /【标题】\nCLEAR model release/, "the score reads the original title, before any writing");
@@ -235,6 +236,15 @@ test("structure retains grounded conditions, rejects invented or unseen quotes, 
   const titleOnly = normalizeStructure(StructureSchema.parse({ ...base, scope: "single" }), { ...input, bodyText: null, excerpt: null });
   assert.equal(titleOnly.scope, "unknown", "a confident model cannot supply the missing original material");
   assert.equal(titleOnly.fact, null);
+  assert.deepEqual(titleOnly.unmatchedSubjects, [], "no fact, no subject to miss");
+});
+
+test("of a fact subject's names, those that are no company of the list are kept apart, each once", async () => {
+  const input = (await loadAnalyzeInput(await article("SUBJECTS")))!;
+  const subject = (s: string) => normalizeStructure(StructureSchema.parse({ category: "ai-models", tags: [], subjects: [], fact: { title: "发布", subject: s } }), input).unmatchedSubjects;
+  assert.deepEqual(subject("Open AI、新锐实验室 / 月之暗面；新锐实验室"), ["新锐实验室"], "a known name in another case or spacing is known");
+  assert.deepEqual(subject("Anthropic"), []);
+  assert.deepEqual(subject("OpenAI 研究团队"), ["OpenAI 研究团队"], "a name only containing a company's name is not that name");
 });
 
 test("a near-selected item is written like a selected one; below the floor it is translated", async () => {

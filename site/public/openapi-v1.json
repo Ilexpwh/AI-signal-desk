@@ -3510,6 +3510,28 @@
           },
           "attribution": {
             "$ref": "#/components/schemas/Attribution"
+          },
+          "iptc": {
+            "type": "object",
+            "required": [
+              "code",
+              "label"
+            ],
+            "description": "The IPTC Media Topic the site maps this item's category to (http://cv.iptc.org/newscodes/mediatopic/{code}). Present only when the site maps the category; omitted otherwise, including from fields=minimal. Derived from category, so it follows the site's current mapping.",
+            "properties": {
+              "code": {
+                "type": "string",
+                "examples": [
+                  "13000000"
+                ]
+              },
+              "label": {
+                "type": "string",
+                "examples": [
+                  "science and technology"
+                ]
+              }
+            }
           }
         }
       },

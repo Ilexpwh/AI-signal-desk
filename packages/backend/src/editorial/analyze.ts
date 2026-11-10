@@ -35,7 +35,7 @@ import {
   needsShortTweetTranslation, parseTranslateOutput, PREFILTER_SYSTEM, prefilterUser, subjectGuard, translateInputOf, UNDERSTAND_SYSTEM, understandUser,
   type IdentityGuard,
 } from "./writing.ts";
-import { CATEGORY_GUIDE, CATEGORY_TAGS, ENTITIES, ENTITY_TAGS, ITEM_TYPES, normalizeTags, TOPIC_TAGS } from "./vocabulary.ts";
+import { CATEGORY_GUIDE, CATEGORY_TAGS, ENTITIES, ENTITY_TAGS, ITEM_TYPES, normalizeTags, TOPIC_TAGS, unmatchedSubjects } from "./vocabulary.ts";
 import { promptText, promptVersion } from "./prompts.ts";
 import { originalPostCopy } from "../content/posts.ts";
 import { wordingProblems } from "./wording.ts";
@@ -225,7 +225,10 @@ function groundedIn(a: AnalyzeInputArticle) {
   };
 }
 
-/** Keep only quotes present both in the original material and in the text the structure model saw. */
+/**
+ * Keep only quotes present both in the original material and in the text the structure model saw. The fact
+ * subject's names that are no company of the vocabulary are kept apart, for the admin's 未收录主体 list.
+ */
 export function normalizeStructure(data: z.infer<typeof StructureSchema>, a: AnalyzeInputArticle) {
   const originals = originalTexts(a);
   // A title is not the unseen contents of a video/article, regardless of the model's confidence.
@@ -243,7 +246,7 @@ export function normalizeStructure(data: z.infer<typeof StructureSchema>, a: Ana
   return {
     category: data.category, tags: normalizeTags(data.tags),
     subjects: [...new Set(data.subjects.map((s) => s.trim().toLowerCase()).filter((s) => s in ENTITIES))],
-    scope, fact,
+    scope, fact, unmatchedSubjects: unmatchedSubjects(fact?.subject),
   };
 }
 
@@ -651,6 +654,7 @@ export function normalizeAnalysis(run: AnalysisRun) {
     scope: run.structure?.scope ?? "unknown",
     fact: run.structure?.fact ?? null,
     subjectGuard: subjectGuard(run.structure?.fact?.subject, titleZh),
+    unmatchedSubjects: run.structure?.unmatchedSubjects ?? [],
   };
 }
 
@@ -687,7 +691,7 @@ export async function analyzeArticle(articleId: string, opts: StepOpts = {}): Pr
     scores: out.scores, scoreAxes: out.scoreAxes, scoreModel: out.scoreModel, threshold: out.threshold, ...(out.scoreRefused ? { scoreRefused: true } : {}),
     ...(w ? { writer: w.kind, writerModel: w.model, itemType: w.itemType ?? null, authorRole: w.authorRole ?? null } : {}),
     ...(w?.identityGuard?.outcome === "fallback" ? { identityGuard: w.identityGuard } : {}),
-    scope: out.scope, fact: out.fact, subjectGuard: out.subjectGuard,
+    scope: out.scope, fact: out.fact, subjectGuard: out.subjectGuard, ...(out.unmatchedSubjects.length ? { unmatchedSubjects: out.unmatchedSubjects } : {}),
     ...(run.grounding ? { grounding: checked ? { model: checked.model, claims: checked.claims } : run.grounding } : {}),
   };
   // A later reprint from another source is told by this fingerprint (editorial/copies.ts).
