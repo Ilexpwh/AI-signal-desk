@@ -1,7 +1,8 @@
 // The story-digest evaluation (scripts/eval-story-digests.ts) is the check before a prompt change reaches every
 // event, so two things are held: a case exported from an event is what the site itself sends (other reports,
-// order, framing, system prompt, model or sampling would make the comparison meaningless), and nothing is
-// paid for when the calls exceed the limit or the candidate cannot be compared.
+// order, framing, system prompt, model or sampling would make the comparison meaningless) and the answer is
+// read as the site would publish it, and nothing is paid for when the calls exceed the limit or the candidate
+// cannot be compared.
 import { pointModels, stub, tag } from "./setup.ts";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -14,7 +15,7 @@ import { promisify } from "node:util";
 import { REPO_ROOT } from "@aihot/backend/config";
 import { closeDb, sql } from "@aihot/backend/db";
 import { composeStoryDigest } from "@aihot/backend/events/digest";
-import { parseDigestEvalJsonl } from "../scripts/eval-story-digests-core.ts";
+import { parseDigestEvalJsonl, type DigestEvalReport } from "../scripts/eval-story-digests-core.ts";
 
 const exec = promisify(execFile);
 const key = `digest-eval-${tag()}`;
@@ -39,9 +40,9 @@ async function run(args: string[], providerUrl: string) {
 }
 
 const scratch = () => mkdtempSync(path.join(tmpdir(), "story-digest-eval-"));
-const answer = (title: string, digest: string, tokens: [number, number]) => ({
+const answer = (title: string, sentences: Array<{ text: string; reports: string[] }>, tokens: [number, number]) => ({
   id: "local",
-  choices: [{ message: { content: JSON.stringify({ title, digest }) } }],
+  choices: [{ message: { content: JSON.stringify({ title, sentences }) } }],
   usage: { prompt_tokens: tokens[0], completion_tokens: tokens[1] },
 });
 
@@ -84,10 +85,16 @@ async function storyState(storyId: number) {
 
 test("a case exported from an event reaches the model exactly as the site's own digest request", async (t) => {
   const bodies: string[] = [];
-  // An empty title keeps the event's title, so later steps read the same event the export read.
+  // An empty title keeps the event's title, so later steps read the same event the export read. One
+  // sentence cites nothing: the site drops it, and the evaluation says so.
+  const cited = [
+    "Acme 已向首批客户开放 Atlas 有限测试，目前只有首批客户可以试用。",
+    "这次测试仍然只面向首批客户，其他客户暂时还不能使用，需要等待后续的开放安排。",
+    "首批客户可以在测试期间试用 Atlas，并向 Acme 反馈使用情况。",
+  ].map((text) => ({ text, reports: [`${key}-first`] }));
   const provider = await stub((_hit, req) => {
     bodies.push(req.body);
-    return answer("", "Acme 已向首批客户开放 Atlas 有限测试。", [100, 20]);
+    return answer("", [...cited, { text: "这一句没有标出处。", reports: [] }], [100, 20]);
   });
   pointModels(provider.url, ["deepseek-flash"]);
   const dir = scratch();
@@ -125,6 +132,11 @@ test("a case exported from an event reaches the model exactly as the site's own 
     const evaluated = await run(["--cases", snapshot, "--out-dir", dir], provider.url);
     assert.equal(evaluated.code, 0, evaluated.stderr);
     assert.equal(bodies.at(-1), site, `${step}: model, system prompt, input and sampling are the site's, byte for byte`);
+    const written = readdirSync(dir).filter((name) => name.startsWith("story-digests-") && name.endsWith(".json")).sort().at(-1)!;
+    const result = JSON.parse(readFileSync(path.join(dir, written), "utf8")) as DigestEvalReport;
+    const [model] = Object.values(result.models);
+    assert.deepEqual(model!.summary.live.dropped, { uncited: 1, unlisted: 0, unsupported: 0 }, `${step}: the sentence the site drops, and why`);
+    assert.equal(model!.cases[0]!.live.digest, (await storyState(g.id)).digest, `${step}: the evaluation publishes what the site does`);
   }
 });
 
@@ -145,7 +157,7 @@ const evalCase = (caseId: string, title: string) => ({
 });
 
 test("nothing is sent when the calls exceed the limit or the candidate cannot be compared", async (t) => {
-  const provider = await stub(() => answer("", "不应调用的综述文字。", [1, 1]));
+  const provider = await stub(() => answer("", [{ text: "不应调用的综述文字。", reports: [] }], [1, 1]));
   const dir = scratch();
   t.after(async () => {
     await provider.close();
@@ -159,7 +171,7 @@ test("nothing is sent when the calls exceed the limit or the candidate cannot be
   };
   const two = write("two.jsonl", [1, 2].map((n) => JSON.stringify(evalCase(`${marker}-${n}`, `事件 ${n}`))).join("\n"));
   const ten = write("ten.jsonl", Array.from({ length: 10 }, (_, n) => JSON.stringify(evalCase(`${marker}-ten-${n}`, `事件 ${n}`))).join("\n"));
-  const candidate = write("candidate.md", "你是 {{siteName}} 的事件编辑。只输出 JSON：{\"title\": \"...\", \"digest\": \"...\"}\n");
+  const candidate = write("candidate.md", "你是 {{siteName}} 的事件编辑。只输出 JSON：{\"title\": \"...\", \"sentences\": [{\"text\": \"...\", \"reports\": [\"...\"]}]}\n");
   const unknownValue = write("unknown.md", "你是 {{siteName}} 的事件编辑，服务 {{audience}}。\n");
   const same = path.join(dir, "same.md");
   copyFileSync(path.join(REPO_ROOT, "industry/prompts/story-digest.md"), same);

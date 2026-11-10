@@ -89,6 +89,14 @@ COMPOSE_PROFILES=render
 
 ### 更新
 
+**事件综述逐句标出处（AI-signal-desk）**：迁移 `0131` 给 `story_digests` 加一列 `citations`（可以为空），照下面的命令更新时 setup 会跑它，不改已有的数据。没有新环境变量。综述的每一句都列出它依据的报道，事件页在句末用小号数字链到这些报道；句中的数字、日期、英文名称和公司名在所引报道里找不到的句子不发布；拿掉了句子、剩下不足 100 字时保留上一版综述，没有上一版就不显示综述（没拿掉句子的综述多短都照常发布），见 [事件综述](grouping.md#事件综述)。要注意：
+
+- **已有的综述没有出处**，照常显示、不带数字标记，事件的综述重写后才有。不批量重写；想让某几个事件立即重写，见 [综述评测](story-digest-evaluation.md#4-改完提示词之后)。
+- **综述换了重写时机**：只在事件多了一个综述还没写到的事实、来了一篇一手报道（`T1` 或核实过的当事方账号），或者写综述所依据的报道被更正、撤下时重写；别家媒体重复已写到的事实不再重写，模型调用会比原来少。
+- **`industry/prompts/story-digest.md` 的输出变了**，从 `{"title", "digest"}` 改成逐句的 `{"title", "sentences": [{"text", "reports", "newParagraph"}]}`。自己改过这份提示词的，合并时把输出换成新的写法（见示范提示词末尾）；还在输出 `digest` 的提示词会让每次写综述都因格式不对而失败。
+- 网站接口 `/api/site/stories/<id>` 多了 `digestSentences`（没有出处时是 `null`）。`digest` 仍是整段文字，公开接口 `/api/v1`、RSS、MCP 和 Agent Markdown 没有变化。
+- 上线前用 [综述评测](story-digest-evaluation.md) 在自己的事件上跑一遍，看有多少句因为出处对不上没发布、多少事件检查后不足 100 字。
+
 **未收录主体、Wikidata 和 IPTC（AI-signal-desk）**：没有数据库迁移，没有新环境变量，不调用模型，已存的数据不用改。说明见 [把它改成你的行业](customize.md#2-分类标签和主题industrytaxonomytsindustrytopicsjson)。要注意：
 
 - **未收录主体**：之后的判断把事实主体里对不上 `ENTITIES` 的名字记在 `output.unmatchedSubjects`；后台“内容诊断”页不输入搜索词时列出近 30 天出现 3 篇以上的。升级前判过的资料没有这项，列表要随新资料慢慢攒起来。

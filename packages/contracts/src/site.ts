@@ -267,6 +267,14 @@ export interface StoryReportView {
   firstRelease: boolean;
 }
 
+/** A digest sentence and the reports it cites, each a numbered mark: a report keeps the number of its first citation. */
+export interface StoryDigestSentence {
+  text: string;
+  /** Opens a new paragraph. */
+  newParagraph: boolean;
+  cites: Array<{ n: number; id: string; title: string; sourceName: string }>;
+}
+
 export interface StoryFactView {
   factId: string;
   title: string;
@@ -293,6 +301,8 @@ export interface StoryDetail {
   firstReportAt: string | null;
   latestAt: string | null;
   digest: string | null;
+  /** The digest sentence by sentence with the reports each cites; null without a digest or for one written before citations. */
+  digestSentences: StoryDigestSentence[] | null;
   digestUpdatedAt: string | null;
   /** The story's own factual summary, when it has one. */
   summary: string | null;
