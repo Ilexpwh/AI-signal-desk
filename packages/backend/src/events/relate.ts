@@ -11,6 +11,7 @@
 import { z } from "zod";
 import { describePublicationTime } from "../sources/dates.ts";
 import { promptText, promptVersion } from "../editorial/prompts.ts";
+import { entityIdentity } from "../editorial/vocabulary.ts";
 
 export const RELATE_PROMPT_VERSION = promptVersion("group-pair", "group-signal");
 export const BATCH_PROMPT_VERSION = promptVersion("group-batch");
@@ -155,6 +156,12 @@ export function sameOccurrence(cands: CandidateView[], verdicts: Map<number, Ver
   return cands
     .filter((c) => verdicts.get(c.factId)?.relation === "SAME_OCCURRENCE")
     .sort((a, b) => (verdicts.get(b.factId)!.confidence - verdicts.get(a.factId)!.confidence) || (b.score - a.score));
+}
+
+/** Both subjects are exactly one company the vocabulary knows (entityIdentity), and the same one. */
+export function sameSubject(a: string | null | undefined, b: string | null | undefined): boolean {
+  const id = entityIdentity(a);
+  return id !== null && id === entityIdentity(b);
 }
 
 /** The story a development joins: the most similar candidate that is its story's root occurrence. */
