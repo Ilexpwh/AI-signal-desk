@@ -32,6 +32,45 @@ function Step({ title, meta, children, tone = "accent", last }: { title: ReactNo
   );
 }
 
+type Analysis = AdminContentChain["analyses"][number];
+const VERDICT = { supported: ["ok", "有依据"], unsupported: ["bad", "原文不支持"], unclear: ["warn", "说不清"] } as const;
+
+/** The copy checks of a judgement: recorded only, the copy readers see is as the model wrote it. */
+function CopyChecks({ guard, grounding }: { guard: Analysis["subject_guard"]; grounding: Analysis["grounding"] }) {
+  if (!guard && !grounding) return null;
+  const claims = grounding && "claims" in grounding ? grounding.claims : null;
+  const count = (verdict: keyof typeof VERDICT) => claims?.filter((c) => c.verdict === verdict).length ?? 0;
+  return (
+    <div className="mt-2 space-y-1.5 text-[12.5px]">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {guard?.outcome === "match" && <Badge tone="ok">标题主体与事实一致</Badge>}
+        {guard?.outcome === "mismatch" && <Badge tone="bad">标题写的是 {guard.titleEntities.join("、")}，事实主体是 {guard.factEntity}</Badge>}
+        {guard?.outcome === "unknown" && <Badge title={guard.factEntity ? `事实主体 ${guard.factEntity}，标题里认不出它` : "事实没有可认出的主体"}>主体未能核对</Badge>}
+        {grounding && "failed" in grounding && <Badge tone="warn">原文核对失败（{grounding.failed}）</Badge>}
+      </div>
+      {claims && (
+        <details open={count("unsupported") > 0} className="rounded-control bg-surface ring-1 ring-line">
+          <summary className="cursor-pointer select-none px-3 py-1.5 text-[12px] text-ink-3 hover:text-ink-2">
+            原文核对：有依据 {count("supported")} · 原文不支持 {count("unsupported")} · 说不清 {count("unclear")}
+          </summary>
+          <ul className="space-y-1.5 px-3 pb-3">
+            {claims.map((c, i) => (
+              <li key={i}>
+                <div className="flex flex-wrap items-baseline gap-1.5">
+                  <Badge tone={VERDICT[c.verdict][0]}>{VERDICT[c.verdict][1]}</Badge>
+                  <span className="text-ink-4">{c.part === "title" ? "标题" : "摘要"}</span>
+                  <span className="text-ink-2">{c.text}</span>
+                </div>
+                {c.quote && <div className="mt-0.5 text-[12px] leading-relaxed text-ink-4">原文：{c.quote}</div>}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
 type Dialog = null | "visibility" | "seo" | "override" | "analyze" | "extract" | "presentation" | "group" | "detach" | "merge";
 
 export default function ContentItem({ loaderData }: Route.ComponentProps) {
@@ -166,6 +205,7 @@ export default function ContentItem({ loaderData }: Route.ComponentProps) {
                       </div>
                       {an.title_zh && <div className="mt-2 font-medium text-ink">{an.title_zh}</div>}
                       {an.reason_zh && <div className="mt-1 text-[12.5px] leading-relaxed text-ink-3">{an.reason_zh}</div>}
+                      <CopyChecks guard={an.subject_guard} grounding={an.grounding} />
                       {an.receipts.length > 0 && (
                         <div className="mt-2 flex flex-wrap gap-1.5 text-[11.5px]">
                           {an.receipts.map((r) => (

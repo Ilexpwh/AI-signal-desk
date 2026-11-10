@@ -90,6 +90,22 @@ async function sourceSpread(since: Date, now: Date): Promise<string[]> {
 }
 
 /**
+ * This week's items written by the content understanding (selected and near-selected), by their current judgement: how many
+ * the copy checks found wrong. Only recorded so far; the owner reads these before they change any copy.
+ */
+async function copyChecks(since: Date): Promise<string[]> {
+  const [c] = await sql<{ checked: number; mismatch: number; unsupported: number; failed: number }[]>`
+    SELECT count(*)::int AS checked,
+           count(*) FILTER (WHERE an.output->'subjectGuard'->>'outcome' = 'mismatch')::int AS mismatch,
+           count(*) FILTER (WHERE jsonb_path_exists(an.output, '$.grounding.claims[*] ? (@.verdict == "unsupported")'))::int AS unsupported,
+           count(*) FILTER (WHERE an.output->'grounding' ? 'failed')::int AS failed
+    FROM articles a CROSS JOIN LATERAL (SELECT output FROM analyses WHERE article_id = a.id ORDER BY id DESC LIMIT 1) an
+    WHERE a.discovered_at >= ${since} AND an.output ? 'grounding'`;
+  if (!c!.checked) return [];
+  return [`本周入选和接近入选的 ${n(c!.checked)} 条稿子：标题主体和事实对不上 ${c!.mismatch} 条，有原文不支持的说法 ${c!.unsupported} 条${c!.failed ? `，核对失败 ${c!.failed} 条` : ""}（只记录，没改文字）`];
+}
+
+/**
  * The sources most often first with a fact others reported too, over sourceStats' 30 days: the evidence for a
  * tier worth a look. The whole list is the admin source page's; the owner sets the tiers.
  */
@@ -131,6 +147,7 @@ export async function sourceHealthWeekly(now = Date.now()) {
     `本周收录 ${n(items!.week)} 条（上周 ${n(items!.prev)}，${pct(items!.week, items!.prev)}），其中精选 ${n(items!.selected)} 条`,
     `在用信源 ${counts!.enabled} 个，本周新增 ${counts!.added} 个；抓取失败 ${counts!.failing} 个，不太稳定 ${counts!.degraded} 个`,
     ...(await sourceSpread(since, new Date(now))),
+    ...(await copyChecks(since)),
   ];
   if (served.length) {
     const perUse = new Map<string, number>();

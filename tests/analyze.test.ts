@@ -1,8 +1,9 @@
 // The judging and writing steps (editorial/analyze.ts): the prefilter decides relevance, two scores
 // against the source's threshold (its tier's, raised by its class) decide 精选, selected and near-selected items are written by the content
 // understanding and the rest by the title/summary translation, a structure step gives the category,
-// subjects and fact. Material with only a feed summary has its page fetched first. A reprint of an
-// article another source already had judged takes that judgement without a model call.
+// subjects and fact. The content understanding's copy is checked against the material, only on record.
+// Material with only a feed summary has its page fetched first. A reprint of an article another source
+// already had judged takes that judgement without a model call.
 import { pointModels, Reply, stub, tag } from "./setup.ts";
 import { analysisStep, scoreAnswer, type AnalysisStep } from "./analysis-steps.ts";
 import assert from "node:assert/strict";
@@ -18,7 +19,7 @@ import { commitCopy, copyText, findOriginal, fingerprint } from "@aihot/backend/
 import { publishArticle } from "@aihot/backend/publication/publish";
 import { processArticle, queueProcessing } from "@aihot/backend/jobs/content";
 import { QUEUES, stopBoss } from "@aihot/backend/jobs/queue";
-import { compactAnswerFirstSummary, enforceIdentity, MAX_BODY_CHARS, parseTranslateOutput } from "@aihot/backend/editorial/writing";
+import { compactAnswerFirstSummary, enforceIdentity, MAX_BODY_CHARS, parseTranslateOutput, subjectGuard } from "@aihot/backend/editorial/writing";
 import { READER_WORDING } from "@aihot/industry/wording";
 import { SELECTION } from "@aihot/industry/selection";
 import { ITEM_TYPES } from "@aihot/industry/taxonomy";
@@ -32,7 +33,7 @@ const OFFICIAL = `test-analyze-official-${T}`;
 
 interface Req { step: AnalysisStep; marker: string; user: string }
 const requests: Req[] = [];
-const MARKERS = ["CLEAR", "RESCUE", "LOW", "OFFTOPIC", "BARE", "VAGUE", "THIN", "SENSITIVE", "推文", "WORDY", "REFUSAL", "RENUMBER", "UNMENDED", "ECOSYS", "GARBLED", "DECISIVE", "BORDER", "REPRINT", "UNWANTED"];
+const MARKERS = ["CLEAR", "RESCUE", "LOW", "OFFTOPIC", "BARE", "VAGUE", "THIN", "SENSITIVE", "推文", "WORDY", "REFUSAL", "RENUMBER", "UNMENDED", "ECOSYS", "GARBLED", "DECISIVE", "BORDER", "REPRINT", "UNWANTED", "SWAPPED", "UNCHECKED"];
 // The scores sit a few points around the pack's T1 threshold and understand floor, so each case means
 // the same after a site recalibrates them: selected when the two add up to 2 × T1, written like a
 // selected item when they add up to more than 2 × FLOOR, translated otherwise.
@@ -47,12 +48,12 @@ const scoreAnswers: Record<string, Array<number | ScoreAxes>> = {
   CLEAR: [T1 + 3, T1 - 1], RESCUE: [FLOOR + 1, FLOOR], LOW: [FLOOR, FLOOR - 1], THIN: [T1, T1], SENSITIVE: [T1, T1], 推文: [FLOOR, FLOOR],
   BARE: [FLOOR - 2, FLOOR - 4], VAGUE: [T1, T1 + 2], WORDY: [T1, T1], REFUSAL: [T1, T1], RENUMBER: [T1, T1], UNMENDED: [T1, T1],
   ECOSYS: [CLASS_FLOOR, CLASS_FLOOR - 1], GARBLED: [GARBLED, GARBLED], DECISIVE: [T1 + 10, T1 + 10], BORDER: [T1 + 2, T1 - 3],
-  REPRINT: Array<number>(40).fill(T1 + 5),
+  REPRINT: Array<number>(40).fill(T1 + 5), SWAPPED: [T1, T1], UNCHECKED: [T1, T1],
 };
 
 const WORDY = ["WORDY", "REFUSAL", "RENUMBER", "UNMENDED"];
 
-// One stub stands in for DashScope (prefilter, structure), Zhipu (score, understand) and DeepSeek (summarize).
+// One stub stands in for DashScope (prefilter, structure), Zhipu (score, understand) and DeepSeek (summarize, verify).
 const provider = await stub((_hit, req) => {
   const body = JSON.parse(req.body) as { messages: Array<{ role: string; content: unknown }> };
   const last = body.messages[body.messages.length - 1]!.content;
@@ -75,11 +76,19 @@ const provider = await stub((_hit, req) => {
     const unmended = marker === "UNMENDED" ? "有禁用词" : "换了说法";
     return answer({ titleZh: `标题里${unmended} ${marker}`, summaryZh: `${marker} 的摘要。第二句补充 ${marker === "RENUMBER" ? 4 : 3} 个数字。`, reasonZh: `理由里${unmended} ${marker}` });
   }
+  // A title about the other of two companies the material names than the one its fact is about.
+  if (step === "understand" && marker === "SWAPPED") return answer({ itemType: "model_release", authorRole: "observer", tags: [], editorialJudgment: "理由 SWAPPED", titleZh: "Anthropic 发布新模型 SWAPPED", summaryZh: "SWAPPED 的摘要。第二句补充一个关键数字。" });
   if (step === "understand") {
     if (marker === "SENSITIVE") return new Reply(400, { contentFilter: [{ level: 1, role: "user" }], error: { code: "1301", message: "系统检测到输入或生成内容可能包含不安全或敏感内容" } });
     return answer({ itemType: "model_release", authorRole: "principal", tags: ["模型发布", "开源", "Agent", "不存在的标签"], editorialJudgment: `理由 ${marker}`, titleZh: `理解标题 ${marker}`, summaryZh: `理解摘要 ${marker}。第二句补充一个关键数字。` });
   }
-  if (step === "structure") return answer({ category: "ai-models", tags: ["模型发布", "推理"], subjects: ["anthropic", "unknown-co"], scope: "single", fact: { title: `事实 ${marker}`, subject: "某公司", action: "发布", object: "模型", occurredAt: null, evidence: "a lab released a model", conditions: [] } });
+  if (step === "structure") return answer({ category: "ai-models", tags: ["模型发布", "推理"], subjects: ["anthropic", "unknown-co"], scope: "single", fact: { title: `事实 ${marker}`, subject: marker === "SWAPPED" ? "OpenAI" : "某公司", action: "发布", object: "模型", occurredAt: null, evidence: "a lab released a model", conditions: [] } });
+  // The check of the copy: a claim the material backs, one backed by a sentence it does not have, one it does not support.
+  if (step === "verify") return marker === "UNCHECKED" ? answer("这不是 JSON") : answer({ claims: [
+    { part: "title", text: `发布新模型 ${marker}`, verdict: "supported", quote: "a lab released a model with a benchmark table" },
+    { part: "summary", text: "对所有人免费", verdict: "supported", quote: "the model is free for everyone" },
+    { part: "summary", text: "补充一个关键数字", verdict: "unsupported", quote: "" },
+  ] });
   return answer(`title_zh: 翻译标题 ${marker}\nsummary_zh: 翻译摘要 ${marker}。第二句补充影响。`);
 });
 pointModels(provider.url);
@@ -115,9 +124,9 @@ test("a selected item: prefilter, two scores, the content understanding and the 
   const id = await article("CLEAR");
   const res = await analyzeArticle(id);
   assert.deepEqual([res!.output!.selected, res!.output!.score], [true, T1 + 1], `${T1 + 3} + ${T1 - 1} >= 2 × ${T1}; the mean is shown`);
-  assert.deepEqual(calls("CLEAR").sort(), ["prefilter", "score", "score", "structure", "understand"]);
+  assert.deepEqual(calls("CLEAR").sort(), ["prefilter", "score", "score", "structure", "understand", "verify"]);
   const r = await row(id);
-  assert.deepEqual([r.title_zh, r.reason_zh, r.category, r.receipt_ids.length], ["理解标题 CLEAR", "理由 CLEAR", "ai-models", 5]);
+  assert.deepEqual([r.title_zh, r.reason_zh, r.category, r.receipt_ids.length], ["理解标题 CLEAR", "理由 CLEAR", "ai-models", 6]);
   // Failure case: the writer's independent labels contradict the structural category.
   assert.deepEqual(r.tags, ["模型发布", "推理", "Anthropic"], "category and tags come from the same structural judgement, plus the verified subject tag");
   assert.deepEqual(r.subjects, ["anthropic"]);
@@ -147,8 +156,8 @@ test("a first score far from every line a score decides is the only one asked", 
     const far = await article("DECISIVE");
     const res = await analyzeArticle(far);
     assert.deepEqual([res!.output!.selected, res!.output!.score, res!.output!.scores], [true, T1 + 10, [T1 + 10]]);
-    assert.deepEqual(calls("DECISIVE").sort(), ["prefilter", "score", "structure", "understand"], "one score call");
-    assert.equal((await row(far)).receipt_ids.length, 4);
+    assert.deepEqual(calls("DECISIVE").sort(), ["prefilter", "score", "structure", "understand", "verify"], "one score call");
+    assert.equal((await row(far)).receipt_ids.length, 5);
     const near = await analyzeArticle(await article("BORDER"));
     assert.deepEqual([near!.output!.selected, near!.output!.scores], [false, [T1 + 2, T1 - 3]], "near the threshold the second score is asked, and the mean decides");
     // An evaluation asks both, then replays what production would have decided at each threshold.
@@ -234,8 +243,36 @@ test("a near-selected item is written like a selected one; below the floor it is
   const lowId = await article("LOW");
   const low = await analyzeArticle(lowId);
   assert.deepEqual([low!.output!.selected, low!.output!.titleZh, low!.output!.reasonZh], [false, "翻译标题 LOW", null]);
-  assert.deepEqual(calls("LOW").sort(), ["prefilter", "score", "score", "structure", "summarize"]);
+  assert.deepEqual(calls("LOW").sort(), ["prefilter", "score", "score", "structure", "summarize"], "the cheaper copy is not checked");
   assert.deepEqual((await row(lowId)).tags, ["模型发布", "推理", "Anthropic"], "structure tags");
+});
+
+test("the content understanding's copy is checked against the material once; the checks are only recorded", async () => {
+  const id = await article("SWAPPED", { bodyText: `SWAPPED: OpenAI and Anthropic both shipped models this week. ${LONG} (${T})` });
+  const res = await analyzeArticle(id);
+  assert.equal(calls("SWAPPED").filter((s) => s === "verify").length, 1);
+  const sent = requests.find((q) => q.marker === "SWAPPED" && q.step === "verify")!;
+  assert.ok(sent.user.includes("OpenAI and Anthropic both shipped") && sent.user.includes("Anthropic 发布新模型 SWAPPED"), "it reads the material and the copy");
+  const r = await row(id);
+  assert.deepEqual([res!.output!.selected, r.title_zh], [true, "Anthropic 发布新模型 SWAPPED"], "readers get the copy as written");
+  assert.deepEqual(r.output.subjectGuard, { outcome: "mismatch", factEntity: "openai", titleEntities: ["anthropic"] }, "the fact is OpenAI's, the title names Anthropic");
+  assert.deepEqual(r.output.grounding.claims.map((c: { verdict: string; quote: string | null }) => [c.verdict, c.quote]), [
+    ["supported", "a lab released a model with a benchmark table"],
+    ["unclear", null],
+    ["unsupported", null],
+  ], "a quote the material does not have does not back a claim");
+  assert.equal(r.receipt_ids.length, 6, "the check's receipt is completed with the judgement");
+});
+
+test("a check that cannot be had leaves the judgement and its copy as they are", async () => {
+  const id = await article("UNCHECKED");
+  const res = await analyzeArticle(id);
+  const r = await row(id);
+  assert.deepEqual([res!.output!.selected, r.relevance, r.title_zh, r.reason_zh], [true, "pass", "理解标题 UNCHECKED", "理由 UNCHECKED"]);
+  assert.deepEqual(r.output.grounding, { failed: "unusable" });
+  assert.equal(r.receipt_ids.length, 5);
+  const [receipt] = await sql<{ status: string }[]>`SELECT status FROM receipts WHERE purpose = 'verify_copy' AND subject LIKE ${`article:${id}@%`}`;
+  assert.equal(receipt!.status, "failed", "asked again the next time the item is analysed");
 });
 
 test("the prefilter's BLOCK stops everything; UNKNOWN with material goes on like PASS", async () => {
@@ -292,6 +329,9 @@ test("guards: a company the input does not name is not written in; long summarie
   // The identity lexicon: a Chinese rendering of a company the input names in English is no invention.
   const alibaba = { title: "Alibaba ships a new coding model", text: "Alibaba released a coding model with pricing details.", sourceKind: "rss" };
   assert.equal(enforceIdentity(alibaba, { titleZh: "阿里巴巴发布编程模型", summaryZh: "阿里巴巴发布了编程模型并公布价格。" }).identityGuard.outcome, "pass");
+  // The title's company against the fact's: a subject the vocabulary does not list as a name is read by the lexicon; one with two companies is not checked.
+  assert.deepEqual(subjectGuard("Google DeepMind 团队", "DeepMind 公布新的蛋白质研究"), { outcome: "match", factEntity: "google", titleEntities: ["google"] });
+  assert.equal(subjectGuard("OpenAI 与微软", "OpenAI 发布新模型").outcome, "unknown");
   const long = "第一句交代了谁做了什么以及关键结果，这一句本身已经足够说明核心事件的来龙去脉。".repeat(3) + "第二句补充数字。".repeat(20);
   assert.ok(compactAnswerFirstSummary(long).length <= 190);
   // A short first sentence and a long second one: the card once ended "…可连接 Google Ads 和 Meta 账号在 Google。".

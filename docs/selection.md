@@ -6,7 +6,7 @@
 2. **预筛**（`prefilter.md`）：这是不是本行业的事。宽进，只拦明显无关的：`BLOCK` 的资料不出现在任何公开页面；`PASS` 和拿不准的 `UNKNOWN` 继续往下走。只有标题、没有正文、订阅摘要或帖子文字的普通文章先等待材料，不评分、不凭标题写文案，也不进入公开池；材料补齐产生新修订后再判断。可展示的空文字或纯链接原帖沿用原有评分与原样展示规则。
 3. **评分**（`selection-score.md`）：同一份评分标准独立打两次分。每次模型只判内容类型、给五个维度各打 0–10 分，并标出材料是否残缺到无法判断（`thin`）；系统按 `industry/selection.ts` 里这个类型的权重把五个维度合成 0–100 分，`thin` 的不高于 `thinCap`。**两次的平均 ≥ 门槛**就够分，门槛按信源分级不同，信源类别还能把某些官方信源的门槛抬高；够分的还要过第 6 步的去重才进精选。页面上显示的分数是两次的平均（向下取整）。第一次的分数离门槛、`understandFloor`、`browseFloor` 都足够远（`secondScoreWithin`）时，第二次不评，直接按第一次判断；默认 `101` 总是评两次，要改先按下文“少评一次分”校准。
 4. **结构化**（`structure.md`）：和评分同时进行。给出分类和标签（页面上显示的就是这一份）、主体公司，判断这篇是一条具体新闻、讲多件事的综合稿，还是材料不够、说不清；是具体新闻的，抽出它的事实（谁、做了什么、对什么、什么时候）和原文里的出处、前提条件。主题页、事件归组和日报都靠它。
-5. **写标题摘要**：等结构化完成再写。入选的和差一点入选的（平均分高于 `understandFloor`），按 `content-understanding.md` 写中文标题、答案先行的摘要和推荐理由；其余的按 `summarize-*.md` 写简短的标题摘要，进“全部动态”。浏览“全部动态”（网页列表，接口、给 Agent 的最新列表和 MCP 的全部模式，“全部动态”RSS）只出平均分不低于 `browseFloor` 的资料，没评上分的照常出；带搜索词时仍搜全部。X 帖子没有正文或只含链接时，保留原帖的链接、图片和引用，不调用写作或翻译模型，也不生成“请补充正文”的文案；已经取得实际正文的 X 长文照常处理。写好的文字用了 `industry/wording.ts` 里列出的词时，再让模型只改这些词一次（`mend-wording.md`）。
+5. **写标题摘要**：等结构化完成再写。入选的和差一点入选的（平均分高于 `understandFloor`），按 `content-understanding.md` 写中文标题、答案先行的摘要和推荐理由；其余的按 `summarize-*.md` 写简短的标题摘要，进“全部动态”。浏览“全部动态”（网页列表，接口、给 Agent 的最新列表和 MCP 的全部模式，“全部动态”RSS）只出平均分不低于 `browseFloor` 的资料，没评上分的照常出；带搜索词时仍搜全部。X 帖子没有正文或只含链接时，保留原帖的链接、图片和引用，不调用写作或翻译模型，也不生成“请补充正文”的文案；已经取得实际正文的 X 长文照常处理。写好的文字用了 `industry/wording.ts` 里列出的词时，再让模型只改这些词一次（`mend-wording.md`）。最后核对写好的文字，只记录、不改（见下文“核对文字”）：标题里的公司和事实主体对不对得上，以及内容理解写的标题和摘要逐条有没有原文依据（`verify-copy.md`）。
 6. **归组与去重**（`group-*.md`）：不同来源报道的同一件事归成一个事件，事件页有综述（`story-digest.md`），“热门”按事件排。修改综述提示词前，可用 [综述评测](story-digest-evaluation.md) 在同一批事件上把现有提示词和候选提示词并排比较。分数够了的资料要等归组完成才进精选：模型同时判断它和精选里已有的报道是不是同一条新闻，以及它有没有精选还没给过的具体信息。
    - 同一条新闻的几篇报道都可以入选：网页上折成一个阅读组；API、RSS 和同步接口每条新闻只出一条，由代表报道出面：官方一手优先；其次是核实过的官方账号（填了 `publisherRole` 和 `owner_entity_id` 的 `T1_5` 账号，新闻的主体正是这家公司，机构先于个人）；再往后是有全文的、分数高的、发得早的。
    - 不是同一条新闻、但没有新信息的（换个说法再介绍一遍已经披露的能力、只是上架到别的平台、只重复已选要点的汇总），不进精选，留在“全部动态”。讲多件事的综合稿不单独成事件，只挂到它提到的事件上，有精选没覆盖的重要内容才入选；材料不够、确认不了是哪条新闻的，不进精选。
@@ -162,6 +162,25 @@ node --env-file=.env scripts/eval-copies.ts --labels .data/eval/copies-labels-<�
 ```
 
 取查准率不低于 98%、而且没有说不清原因的 `different` 的最大距离，填进 `COPY_MAX_DISTANCE`。查准率只把 `copy` 算对：`rewrite` 当成转载，代价是它没有自己的判断（跟着原文的判断和事件，不会自己入选）；`different` 当成转载，它会挂到别的新闻下，是最要避免的错。短稿最容易撞指纹，`different` 多出在字数少的对里时，先调高 `COPY_MIN_CHARS` 再重跑。改完以后的新资料按新数判断，已经认成转载的不变；要某一条按它自己的全文重判，在后台“内容诊断”里点“重新评估”。
+
+### 6. 核对文字：先只记录
+
+写好的文字（改用词之后）还要核对两项。结果只记在判断记录里，读者看到的文字不变：
+
+- **标题主体**（代码比，不调用模型）：结构化抽出的事实主体（`fact.subject`）按 `taxonomy.ts` 的公司名录认出是哪家，认不出时取身份词典在里面找到的唯一一家；再和身份词典在标题里认出的公司比。记成 `output.subjectGuard`：`match`（标题提到了这家）、`mismatch`（标题只提到别家）、`unknown`（事实没有唯一认得出的公司、标题里没有认得出的公司，或者身份词典里没有这家）。每次判断都记。
+- **逐条对照原文**（`verify-copy.md`，模型步骤“核对文字”，环境变量 `VERIFY_MODEL` 可以单独选模型）：只核对内容理解写的标题和摘要，每条多一次调用。模型把它们拆成一条条说法，判断 `supported`、`unsupported` 或 `unclear`，并摘原文的一句作依据。这句要像结构化的出处一样能在原文正文里原样找到，找不到的、或者说有依据却没给原文的，都记成 `unclear`。记成 `output.grounding`（`{model, claims}`）；调用失败或回答不合格式时记 `{failed: "<原因>"}`，判断和文字照常保存，下次重新评估时再核对。
+
+后台“内容诊断”在每次判断下面列出这两项，信源周报多一行：本周入选和接近入选的稿子里，标题主体对不上、有原文不支持的说法、核对失败的各多少条。先看至少两周的记录，确认 `mismatch` 和 `unsupported` 大多真是写错了，再决定要不要据此改动文字。逐条看：
+
+```sql
+SELECT a.id, an.title_zh, an.output->'subjectGuard' AS subject, c->>'part' AS part, c->>'text' AS claim, c->>'quote' AS quote
+FROM articles a
+CROSS JOIN LATERAL (SELECT title_zh, output FROM analyses WHERE article_id = a.id ORDER BY id DESC LIMIT 1) an
+LEFT JOIN LATERAL jsonb_array_elements(an.output->'grounding'->'claims') c ON c->>'verdict' = 'unsupported'
+WHERE a.discovered_at > now() - interval '14 days' AND an.output ? 'grounding'
+  AND (an.output->'subjectGuard'->>'outcome' = 'mismatch' OR c IS NOT NULL)
+ORDER BY a.discovered_at DESC;
+```
 
 ## 换模型
 
