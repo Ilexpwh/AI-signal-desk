@@ -5,10 +5,11 @@
 // (industry/prompts/report-period*.md).
 import { z } from "zod";
 import { EDITION_TIMES, REPORTS, SITE } from "@aihot/site";
-import { PLAIN_TERMS, RELEASE } from "@aihot/industry/taxonomy";
+import { RELEASE } from "@aihot/industry/taxonomy";
 import { promptText, promptVersion } from "../editorial/prompts.ts";
 import { modelFor } from "../editorial/models.ts";
-import { ENTITIES, entityNames, isRelease } from "../editorial/vocabulary.ts";
+import { isRelease } from "../editorial/vocabulary.ts";
+import { grounded } from "../editorial/grounding.ts";
 import { addDays, beijingAt, beijingDate, beijingTime, isoWeekLabel, isoWeekRange, monthRange } from "@aihot/contracts/time";
 import { sql } from "../db.ts";
 import { logError } from "../lib/log-error.ts";
@@ -16,6 +17,7 @@ import { chatJson } from "../providers/llm.ts";
 import { completeReceipt } from "../providers/receipts.ts";
 import { shutdownSignal } from "../jobs/queue.ts";
 import { emit } from "../modules.ts";
+import { risingTopics } from "../publication/topics.ts";
 import { arrangeDaily, candidates, dailyEdition, dailyPicks, periodEntries, sectionOf, SECTION_ORDER, type Candidate, type EditionEntry } from "./edition.ts";
 
 export const REPORT_VERSION = promptVersion("report-period", "report-period-sections", "report-period-no-sections");
@@ -125,6 +127,8 @@ export async function composeDaily(date: string, reason?: string): Promise<{ key
 
 /** A weekly's or monthly's size: the events it carries, chosen and ordered by rule. */
 const PERIOD_EVENTS = { weekly: 20, monthly: 30 } as const;
+/** A weekly's 上升中 section lists at most this many topics (publication/topics.ts risingTopics). */
+const WEEKLY_RISING = 5;
 /** A section is introduced once it carries this many events; one or two are read faster than introduced. */
 const INTRO_EVENTS = 3;
 /** The longest overview and introduction an issue prints; the brief asks for less, writers overshoot. */
@@ -159,27 +163,6 @@ export function periodPrompt(kind: "weekly" | "monthly", startDate: string, endD
   };
 }
 
-const COMPANY_NAMES = Object.values(ENTITIES).map((e) => entityNames(e).map((n) => n.toLowerCase()));
-/** Words a writer may use that name nothing in particular: the pack's plain terms and the site's name. */
-const PLAIN = new Set([...PLAIN_TERMS, SITE.name.toLowerCase()]);
-
-/**
- * Whether written text names only what the listed items name: every capitalised or numbered Latin token
- * (Acme, Nova-2.5, X1), every figure of three or more digits or with a decimal point or percent (845,
- * 129.3, 40%) and every company of the vocabulary appears in the items' own words; a company may be named
- * in either language (谷歌 for Google).
- */
-export function grounded(text: string, corpus: string): boolean {
-  const known = corpus.toLowerCase();
-  const companies = COMPANY_NAMES.filter((names) => names.some((n) => known.includes(n)));
-  const named = (word: string) => PLAIN.has(word) || known.includes(word) || companies.some((names) => names.includes(word));
-  const words = (text.match(/[A-Za-z][A-Za-z0-9.+-]*/g) ?? []).map((w) => w.replace(/[.+-]+$/, "")).filter((w) => /[A-Z0-9]/.test(w));
-  const figures = (text.match(/\d+(?:\.\d+)?%?/g) ?? []).filter((f) => f.length >= 3 || /[.%]/.test(f));
-  const lower = text.toLowerCase();
-  const mentioned = COMPANY_NAMES.filter((names) => names.some((n) => /\p{Script=Han}/u.test(n) && lower.includes(n)));
-  return words.every((w) => named(w.toLowerCase())) && figures.every((f) => known.includes(f)) && mentioned.every((names) => companies.includes(names));
-}
-
 /** The leading whole sentences of a text that fit in `max` characters; null when not even the first does. */
 export function fitted(text: string, max: number): string | null {
   let out = "";
@@ -195,7 +178,8 @@ export function fitted(text: string, max: number): string | null {
  * sections are decided by rule: the first event leads and the next three are the highlights. A model
  * only writes the overview and the introductions of sections with three or more events; text naming
  * anything the events do not name is not used, and overlong text keeps the leading sentences that fit.
- * Without a usable overview the issue is saved with none (see periodOverview).
+ * Without a usable overview the issue is saved with none (see periodOverview). A weekly also lists the
+ * topics that broke out during its week (上升中), from the daily trends and without the model.
  * An automatic run skips a complete period of quiet dailies without publishing an empty issue.
  */
 async function composePeriod(kind: "weekly" | "monthly", key: string, startDate: string, endDateInclusive: string, reason: string | undefined) {
@@ -255,6 +239,7 @@ async function composePeriod(kind: "weekly" | "monthly", key: string, startDate:
     overview,
     themes: groups.map((g) => ({ heading: g.label, summary: intro(g), storyRefs: g.items.map(({ category: _c, factKey: _f, ...e }) => e) })),
     storyOrder: top.map((e) => e.itemId),
+    ...(kind === "weekly" ? { rising: await risingTopics(startDate, endDateInclusive, WEEKLY_RISING) } : {}),
     metrics: { totalStories: top.length, selectedCount: selected.length, reportsCovered: issues },
     generator: { version: REPORT_VERSION, model, written: overview !== null },
   };

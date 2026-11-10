@@ -1,18 +1,25 @@
 // The judging and writing steps (editorial/analyze.ts): the prefilter decides relevance, two scores
 // against the source's threshold (its tier's, raised by its class) decide 精选, selected and near-selected items are written by the content
 // understanding and the rest by the title/summary translation, a structure step gives the category,
-// subjects and fact. Material with only a feed summary has its page fetched first.
+// subjects and fact. The content understanding's copy is checked against the material, only on record.
+// Material with only a feed summary has its page fetched first. A reprint of an article another source
+// already had judged takes that judgement without a model call.
 import { pointModels, Reply, stub, tag } from "./setup.ts";
-import { analysisStep, type AnalysisStep } from "./analysis-steps.ts";
+import { analysisStep, scoreAnswer, type AnalysisStep } from "./analysis-steps.ts";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { closeDb, sql } from "@aihot/backend/db";
 import { upsertMaterial } from "@aihot/backend/content/materials";
-import { analyzeArticle, buildMaterial, loadAnalyzeInput, normalizeStructure, selectionThreshold, StructureSchema, UNDERSTAND_FLOOR } from "@aihot/backend/editorial/analyze";
+import {
+  analyzeArticle, buildMaterial, decidingScores, loadAnalyzeInput, needsSecondScore, normalizeStructure, selectionThreshold, StructureSchema, UNDERSTAND_FLOOR, weighedScore,
+  type ScoreAxes,
+} from "@aihot/backend/editorial/analyze";
 import { createSource, updateSource } from "@aihot/backend/admin/sources";
-import { queueProcessing } from "@aihot/backend/jobs/content";
+import { commitCopy, copyText, findOriginal, fingerprint } from "@aihot/backend/editorial/copies";
+import { publishArticle } from "@aihot/backend/publication/publish";
+import { processArticle, queueProcessing } from "@aihot/backend/jobs/content";
 import { QUEUES, stopBoss } from "@aihot/backend/jobs/queue";
-import { compactAnswerFirstSummary, enforceIdentity, MAX_BODY_CHARS, parseTranslateOutput } from "@aihot/backend/editorial/writing";
+import { compactAnswerFirstSummary, enforceIdentity, MAX_BODY_CHARS, parseTranslateOutput, subjectGuard } from "@aihot/backend/editorial/writing";
 import { READER_WORDING } from "@aihot/industry/wording";
 import { SELECTION } from "@aihot/industry/selection";
 import { ITEM_TYPES } from "@aihot/industry/taxonomy";
@@ -21,10 +28,12 @@ const T = tag();
 const SOURCE = `test-analyze-${T}`;
 const X_SOURCE = `test-analyze-x-${T}`;
 const CLASSED_SOURCE = `test-analyze-classed-${T}`;
+const REPRINTER = `test-analyze-reprinter-${T}`;
+const OFFICIAL = `test-analyze-official-${T}`;
 
 interface Req { step: AnalysisStep; marker: string; user: string }
 const requests: Req[] = [];
-const MARKERS = ["CLEAR", "RESCUE", "LOW", "OFFTOPIC", "BARE", "VAGUE", "THIN", "SENSITIVE", "推文", "WORDY", "REFUSAL", "RENUMBER", "UNMENDED", "ECOSYS"];
+const MARKERS = ["CLEAR", "RESCUE", "LOW", "OFFTOPIC", "BARE", "VAGUE", "THIN", "SENSITIVE", "推文", "WORDY", "REFUSAL", "RENUMBER", "UNMENDED", "ECOSYS", "GARBLED", "DECISIVE", "BORDER", "REPRINT", "UNWANTED", "SWAPPED", "UNCHECKED"];
 // The scores sit a few points around the pack's T1 threshold and understand floor, so each case means
 // the same after a site recalibrates them: selected when the two add up to 2 × T1, written like a
 // selected item when they add up to more than 2 × FLOOR, translated otherwise.
@@ -33,15 +42,18 @@ const T2 = selectionThreshold({ tier: "T2" })!;
 const FLOOR = UNDERSTAND_FLOOR;
 // A pack class whose floor lies between the official and the media threshold: it raises the first, not the second.
 const [CLASS, CLASS_FLOOR] = Object.entries(SELECTION.classes).map(([key, c]) => [key, c.threshold] as const).find(([, t]) => t > T1 && t < T2) ?? [undefined, NaN];
-const scoreAnswers: Record<string, number[]> = {
+// Each score call answers with axes that weigh to the listed score; GARBLED's are marked too thin to judge.
+const GARBLED = scoreAnswer(T1 + 10, { thin: true });
+const scoreAnswers: Record<string, Array<number | ScoreAxes>> = {
   CLEAR: [T1 + 3, T1 - 1], RESCUE: [FLOOR + 1, FLOOR], LOW: [FLOOR, FLOOR - 1], THIN: [T1, T1], SENSITIVE: [T1, T1], 推文: [FLOOR, FLOOR],
   BARE: [FLOOR - 2, FLOOR - 4], VAGUE: [T1, T1 + 2], WORDY: [T1, T1], REFUSAL: [T1, T1], RENUMBER: [T1, T1], UNMENDED: [T1, T1],
-  ECOSYS: [CLASS_FLOOR, CLASS_FLOOR - 1],
+  ECOSYS: [CLASS_FLOOR, CLASS_FLOOR - 1], GARBLED: [GARBLED, GARBLED], DECISIVE: [T1 + 10, T1 + 10], BORDER: [T1 + 2, T1 - 3],
+  REPRINT: Array<number>(40).fill(T1 + 5), SWAPPED: [T1, T1], UNCHECKED: [T1, T1],
 };
 
 const WORDY = ["WORDY", "REFUSAL", "RENUMBER", "UNMENDED"];
 
-// One stub stands in for DashScope (prefilter, structure), Zhipu (score, understand) and DeepSeek (summarize).
+// One stub stands in for DashScope (prefilter, structure), Zhipu (score, understand) and DeepSeek (summarize, verify).
 const provider = await stub((_hit, req) => {
   const body = JSON.parse(req.body) as { messages: Array<{ role: string; content: unknown }> };
   const last = body.messages[body.messages.length - 1]!.content;
@@ -50,8 +62,11 @@ const provider = await stub((_hit, req) => {
   const marker = MARKERS.find((m) => user.includes(m)) ?? "";
   requests.push({ step, marker, user });
   const answer = (content: unknown) => ({ id: `stub-${requests.length}`, model: "stub", choices: [{ message: { content: typeof content === "string" ? content : JSON.stringify(content) } }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } });
-  if (step === "prefilter") return answer({ label: marker === "OFFTOPIC" || marker === "BARE" ? "BLOCK" : marker === "VAGUE" ? "UNKNOWN" : "PASS", reason: "测试" });
-  if (step === "score") return answer({ attentionScore: scoreAnswers[marker]!.shift() });
+  if (step === "prefilter") return answer({ label: ["OFFTOPIC", "BARE", "UNWANTED"].includes(marker) ? "BLOCK" : marker === "VAGUE" ? "UNKNOWN" : "PASS", reason: "测试" });
+  if (step === "score") {
+    const next = scoreAnswers[marker]!.shift()!;
+    return answer(typeof next === "number" ? scoreAnswer(next) : next);
+  }
   // Copy with a word a site keeps from readers (added to the pack's list below), and its mended form: whole (WORDY),
   // refused by the provider, with a number changed, or with as many such words as before.
   if (step === "understand" && WORDY.includes(marker)) return answer({ itemType: ITEM_TYPES[0], authorRole: "principal", tags: [], editorialJudgment: `理由里有禁用词 ${marker}`, titleZh: `标题里有禁用词 ${marker}`, summaryZh: `${marker} 的摘要。第二句补充 3 个数字。` });
@@ -61,11 +76,19 @@ const provider = await stub((_hit, req) => {
     const unmended = marker === "UNMENDED" ? "有禁用词" : "换了说法";
     return answer({ titleZh: `标题里${unmended} ${marker}`, summaryZh: `${marker} 的摘要。第二句补充 ${marker === "RENUMBER" ? 4 : 3} 个数字。`, reasonZh: `理由里${unmended} ${marker}` });
   }
+  // A title about the other of two companies the material names than the one its fact is about.
+  if (step === "understand" && marker === "SWAPPED") return answer({ itemType: "model_release", authorRole: "observer", tags: [], editorialJudgment: "理由 SWAPPED", titleZh: "Anthropic 发布新模型 SWAPPED", summaryZh: "SWAPPED 的摘要。第二句补充一个关键数字。" });
   if (step === "understand") {
     if (marker === "SENSITIVE") return new Reply(400, { contentFilter: [{ level: 1, role: "user" }], error: { code: "1301", message: "系统检测到输入或生成内容可能包含不安全或敏感内容" } });
     return answer({ itemType: "model_release", authorRole: "principal", tags: ["模型发布", "开源", "Agent", "不存在的标签"], editorialJudgment: `理由 ${marker}`, titleZh: `理解标题 ${marker}`, summaryZh: `理解摘要 ${marker}。第二句补充一个关键数字。` });
   }
-  if (step === "structure") return answer({ category: "ai-models", tags: ["模型发布", "推理"], subjects: ["anthropic", "unknown-co"], scope: "single", fact: { title: `事实 ${marker}`, subject: "某公司", action: "发布", object: "模型", occurredAt: null, evidence: "a lab released a model", conditions: [] } });
+  if (step === "structure") return answer({ category: "ai-models", tags: ["模型发布", "推理"], subjects: ["anthropic", "unknown-co"], scope: "single", fact: { title: `事实 ${marker}`, subject: marker === "SWAPPED" ? "OpenAI" : "某公司", action: "发布", object: "模型", occurredAt: null, evidence: "a lab released a model", conditions: [] } });
+  // The check of the copy: a claim the material backs, one backed by a sentence it does not have, one it does not support.
+  if (step === "verify") return marker === "UNCHECKED" ? answer("这不是 JSON") : answer({ claims: [
+    { part: "title", text: `发布新模型 ${marker}`, verdict: "supported", quote: "a lab released a model with a benchmark table" },
+    { part: "summary", text: "对所有人免费", verdict: "supported", quote: "the model is free for everyone" },
+    { part: "summary", text: "补充一个关键数字", verdict: "unsupported", quote: "" },
+  ] });
   return answer(`title_zh: 翻译标题 ${marker}\nsummary_zh: 翻译摘要 ${marker}。第二句补充影响。`);
 });
 pointModels(provider.url);
@@ -74,7 +97,9 @@ before(async () => {
   await sql`INSERT INTO sources (id, name, kind, tier, participation_mode, next_fetch_at) VALUES
     (${SOURCE}, 'Test analyze source', 'rss', 'T1', 'editorial', '2100-01-01'),
     (${X_SOURCE}, 'Test X account', 'x_search', 'T1', 'editorial', '2100-01-01'),
-    (${CLASSED_SOURCE}, 'Test official source that gets a class', 'rss', 'T1', 'editorial', '2100-01-01')`;
+    (${CLASSED_SOURCE}, 'Test official source that gets a class', 'rss', 'T1', 'editorial', '2100-01-01'),
+    (${REPRINTER}, 'Test media that reprints', 'rss', 'T2', 'editorial', '2100-01-01'),
+    (${OFFICIAL}, 'Test second official source', 'rss', 'T1', 'editorial', '2100-01-01')`;
 });
 after(async () => {
   await provider.close();
@@ -99,17 +124,50 @@ test("a selected item: prefilter, two scores, the content understanding and the 
   const id = await article("CLEAR");
   const res = await analyzeArticle(id);
   assert.deepEqual([res!.output!.selected, res!.output!.score], [true, T1 + 1], `${T1 + 3} + ${T1 - 1} >= 2 × ${T1}; the mean is shown`);
-  assert.deepEqual(calls("CLEAR").sort(), ["prefilter", "score", "score", "structure", "understand"]);
+  assert.deepEqual(calls("CLEAR").sort(), ["prefilter", "score", "score", "structure", "understand", "verify"]);
   const r = await row(id);
-  assert.deepEqual([r.title_zh, r.reason_zh, r.category, r.receipt_ids.length], ["理解标题 CLEAR", "理由 CLEAR", "ai-models", 5]);
+  assert.deepEqual([r.title_zh, r.reason_zh, r.category, r.receipt_ids.length], ["理解标题 CLEAR", "理由 CLEAR", "ai-models", 6]);
   // Failure case: the writer's independent labels contradict the structural category.
   assert.deepEqual(r.tags, ["模型发布", "推理", "Anthropic"], "category and tags come from the same structural judgement, plus the verified subject tag");
   assert.deepEqual(r.subjects, ["anthropic"]);
   assert.deepEqual([r.output.writer, r.output.itemType, r.output.prefilter.label, r.output.fact.title], ["understand", "model_release", "PASS", "事实 CLEAR"]);
   assert.equal(r.output.scope, "single");
   assert.equal(r.output.fact.evidence, "a lab released a model");
+  assert.deepEqual(r.output.unmatchedSubjects, ["某公司"], "a fact subject the company list does not know is kept for the admin");
+  assert.deepEqual(r.output.scoreAxes.map(weighedScore), r.output.scores, "each call's type and axes are kept, and weigh to its score");
   const score = requests.find((q) => q.marker === "CLEAR" && q.step === "score")!;
   assert.match(score.user, /【标题】\nCLEAR model release/, "the score reads the original title, before any writing");
+});
+
+test("the score is the type's weighted axes, held low when the material is too thin to judge", async () => {
+  assert.ok(SELECTION.thinCap < FLOOR && T1 + 10 <= 100, "the case needs the thin cap below the understand floor");
+  const id = await article("GARBLED");
+  const res = await analyzeArticle(id);
+  assert.deepEqual([res!.output!.selected, res!.output!.score], [false, SELECTION.thinCap], `axes worth ${T1 + 10} count as ${SELECTION.thinCap}`);
+  assert.deepEqual(calls("GARBLED").sort(), ["prefilter", "score", "score", "structure", "summarize"], "written by the cheaper title/summary prompt");
+  assert.equal((await row(id)).output.scoreAxes[0].thin, true);
+});
+
+test("a first score far from every line a score decides is the only one asked", async () => {
+  const pack = SELECTION as { secondScoreWithin: number };
+  const within = pack.secondScoreWithin;
+  pack.secondScoreWithin = 5; // a margin a site could calibrate
+  try {
+    assert.ok(!needsSecondScore(T1 + 10, T1) && needsSecondScore(T1 + 2, T1), "the cases need T1 + 10 far from the threshold and both floors, T1 + 2 near");
+    const far = await article("DECISIVE");
+    const res = await analyzeArticle(far);
+    assert.deepEqual([res!.output!.selected, res!.output!.score, res!.output!.scores], [true, T1 + 10, [T1 + 10]]);
+    assert.deepEqual(calls("DECISIVE").sort(), ["prefilter", "score", "structure", "understand", "verify"], "one score call");
+    assert.equal((await row(far)).receipt_ids.length, 5);
+    const near = await analyzeArticle(await article("BORDER"));
+    assert.deepEqual([near!.output!.selected, near!.output!.scores], [false, [T1 + 2, T1 - 3]], "near the threshold the second score is asked, and the mean decides");
+    // An evaluation asks both, then replays what production would have decided at each threshold.
+    const both = { model: "m", threshold: T1, values: [T1 + 10, T1 - 20], axes: [scoreAnswer(T1 + 10), scoreAnswer(T1 - 20)], receiptIds: [1, 2], reused: true };
+    assert.deepEqual(decidingScores(both, T1)!.values, [T1 + 10], "far from every line, the first decides alone");
+    assert.deepEqual(decidingScores(both, T1 + 9)!.values, [T1 + 10, T1 - 20], "near a threshold being swept, both decide");
+  } finally {
+    pack.secondScoreWithin = within;
+  }
 });
 
 test("a word the site keeps from readers goes back once to be changed; copy without one is not sent", async () => {
@@ -178,6 +236,15 @@ test("structure retains grounded conditions, rejects invented or unseen quotes, 
   const titleOnly = normalizeStructure(StructureSchema.parse({ ...base, scope: "single" }), { ...input, bodyText: null, excerpt: null });
   assert.equal(titleOnly.scope, "unknown", "a confident model cannot supply the missing original material");
   assert.equal(titleOnly.fact, null);
+  assert.deepEqual(titleOnly.unmatchedSubjects, [], "no fact, no subject to miss");
+});
+
+test("of a fact subject's names, those that are no company of the list are kept apart, each once", async () => {
+  const input = (await loadAnalyzeInput(await article("SUBJECTS")))!;
+  const subject = (s: string) => normalizeStructure(StructureSchema.parse({ category: "ai-models", tags: [], subjects: [], fact: { title: "发布", subject: s } }), input).unmatchedSubjects;
+  assert.deepEqual(subject("Open AI、新锐实验室 / 月之暗面；新锐实验室"), ["新锐实验室"], "a known name in another case or spacing is known");
+  assert.deepEqual(subject("Anthropic"), []);
+  assert.deepEqual(subject("OpenAI 研究团队"), ["OpenAI 研究团队"], "a name only containing a company's name is not that name");
 });
 
 test("a near-selected item is written like a selected one; below the floor it is translated", async () => {
@@ -186,8 +253,36 @@ test("a near-selected item is written like a selected one; below the floor it is
   const lowId = await article("LOW");
   const low = await analyzeArticle(lowId);
   assert.deepEqual([low!.output!.selected, low!.output!.titleZh, low!.output!.reasonZh], [false, "翻译标题 LOW", null]);
-  assert.deepEqual(calls("LOW").sort(), ["prefilter", "score", "score", "structure", "summarize"]);
+  assert.deepEqual(calls("LOW").sort(), ["prefilter", "score", "score", "structure", "summarize"], "the cheaper copy is not checked");
   assert.deepEqual((await row(lowId)).tags, ["模型发布", "推理", "Anthropic"], "structure tags");
+});
+
+test("the content understanding's copy is checked against the material once; the checks are only recorded", async () => {
+  const id = await article("SWAPPED", { bodyText: `SWAPPED: OpenAI and Anthropic both shipped models this week. ${LONG} (${T})` });
+  const res = await analyzeArticle(id);
+  assert.equal(calls("SWAPPED").filter((s) => s === "verify").length, 1);
+  const sent = requests.find((q) => q.marker === "SWAPPED" && q.step === "verify")!;
+  assert.ok(sent.user.includes("OpenAI and Anthropic both shipped") && sent.user.includes("Anthropic 发布新模型 SWAPPED"), "it reads the material and the copy");
+  const r = await row(id);
+  assert.deepEqual([res!.output!.selected, r.title_zh], [true, "Anthropic 发布新模型 SWAPPED"], "readers get the copy as written");
+  assert.deepEqual(r.output.subjectGuard, { outcome: "mismatch", factEntity: "openai", titleEntities: ["anthropic"] }, "the fact is OpenAI's, the title names Anthropic");
+  assert.deepEqual(r.output.grounding.claims.map((c: { verdict: string; quote: string | null }) => [c.verdict, c.quote]), [
+    ["supported", "a lab released a model with a benchmark table"],
+    ["unclear", null],
+    ["unsupported", null],
+  ], "a quote the material does not have does not back a claim");
+  assert.equal(r.receipt_ids.length, 6, "the check's receipt is completed with the judgement");
+});
+
+test("a check that cannot be had leaves the judgement and its copy as they are", async () => {
+  const id = await article("UNCHECKED");
+  const res = await analyzeArticle(id);
+  const r = await row(id);
+  assert.deepEqual([res!.output!.selected, r.relevance, r.title_zh, r.reason_zh], [true, "pass", "理解标题 UNCHECKED", "理由 UNCHECKED"]);
+  assert.deepEqual(r.output.grounding, { failed: "unusable" });
+  assert.equal(r.receipt_ids.length, 5);
+  const [receipt] = await sql<{ status: string }[]>`SELECT status FROM receipts WHERE purpose = 'verify_copy' AND subject LIKE ${`article:${id}@%`}`;
+  assert.equal(receipt!.status, "failed", "asked again the next time the item is analysed");
 });
 
 test("the prefilter's BLOCK stops everything; UNKNOWN with material goes on like PASS", async () => {
@@ -244,6 +339,9 @@ test("guards: a company the input does not name is not written in; long summarie
   // The identity lexicon: a Chinese rendering of a company the input names in English is no invention.
   const alibaba = { title: "Alibaba ships a new coding model", text: "Alibaba released a coding model with pricing details.", sourceKind: "rss" };
   assert.equal(enforceIdentity(alibaba, { titleZh: "阿里巴巴发布编程模型", summaryZh: "阿里巴巴发布了编程模型并公布价格。" }).identityGuard.outcome, "pass");
+  // The title's company against the fact's: a subject the vocabulary does not list as a name is read by the lexicon; one with two companies is not checked.
+  assert.deepEqual(subjectGuard("Google DeepMind 团队", "DeepMind 公布新的蛋白质研究"), { outcome: "match", factEntity: "google", titleEntities: ["google"] });
+  assert.equal(subjectGuard("OpenAI 与微软", "OpenAI 发布新模型").outcome, "unknown");
   const long = "第一句交代了谁做了什么以及关键结果，这一句本身已经足够说明核心事件的来龙去脉。".repeat(3) + "第二句补充数字。".repeat(20);
   assert.ok(compactAnswerFirstSummary(long).length <= 190);
   // A short first sentence and a long second one: the card once ended "…可连接 Google Ads 和 Meta 账号在 Google。".
@@ -275,7 +373,9 @@ test("after the admin gives a source a class, analysing again holds the paid sco
   await updateSource(CLASSED_SOURCE, { patch: { selection_class: CLASS }, version: await version(), reason: "test" }, "test");
   const hits = provider.hits();
   const again = await analyzeArticle(id);
-  assert.equal(provider.hits(), hits, "the same paid answers: the class is not part of any model input");
+  // The same paid answers (the class is not part of any model input); the second score is asked now only if
+  // the first decided alone against the lower threshold, and lies near the class floor.
+  assert.equal(provider.hits() - hits, needsSecondScore(CLASS_FLOOR, T1) ? 0 : 1);
   assert.deepEqual([again!.output!.selected, again!.output!.score, (await row(id)).output.threshold], [false, CLASS_FLOOR - 1, CLASS_FLOOR]);
   const created = await createSource({ id: `test-classed-new-${T}`, name: "Created with a class", kind: "rss", config: { feedUrl: `https://example.com/feed-${T}.xml` }, tier: "T1", selection_class: CLASS }, "test");
   assert.equal(created.created && created.source.selection_class, CLASS, "a new source can start with a class");
@@ -290,4 +390,99 @@ test("analysing the same revision again reuses every paid answer", async () => {
   const again = await analyzeArticle(id);
   assert.equal(provider.hits(), hits, "no new requests");
   assert.deepEqual([again!.reused, again!.receiptIds], [true, first!.receiptIds]);
+});
+
+// Reprints (editorial/copies.ts). Each original has a text of its own: random words, without LONG, whose
+// eight repeats outweigh anything beside them and bring every other fixture article within a few bits. So
+// no case finds another's original; its reprint differs only in what the fingerprint leaves out (spacing, a link).
+const words = () => Array.from({ length: 40 }, () => Math.random().toString(36).slice(2, 8)).join(" ");
+async function original(marker: "REPRINT" | "UNWANTED", sourceId = SOURCE, bodyText = `${marker}: ${words()} ${words()}`) {
+  const title = `${marker} model release ${tag()}`;
+  const id = await article(marker, { sourceId, url: `https://example.com/original-${tag()}`, title, bodyText });
+  await analyzeArticle(id);
+  return { id, title, bodyText };
+}
+const grouped = (id: string) => sql`UPDATE articles SET grouping_status = 'complete' WHERE id = ${id}`;
+const reprint = async (of: { title: string; bodyText: string }, sourceId = REPRINTER) => (await upsertMaterial({
+  sourceId, url: `https://example.org/reprint-${tag()}`, title: of.title, bodyText: `${of.bodyText.replaceAll(" ", "  ")}\n\nhttps://example.org/from-${tag()}`,
+  bodyStatus: "ok", via: "fetch", publishedAt: new Date("2026-09-28T01:02:03Z"),
+})).articleId;
+/** Processes the article; true when it was judged in full: some model call, and a judgement that names no original. */
+const judgedInFull = async (id: string, opts: { attemptTag?: string } = {}) => {
+  const hits = provider.hits();
+  await processArticle(id, opts);
+  return provider.hits() > hits && (await row(id)).output.copyOf === undefined;
+};
+
+test("a reprint from another source takes the original's judgement without a model call, a block as well", async () => {
+  const passed = await original("REPRINT");
+  await grouped(passed.id);
+  const copy = await reprint(passed);
+  const hits = provider.hits();
+  assert.equal((await processArticle(copy)).state, "pass");
+  assert.equal(provider.hits(), hits, "no model call");
+  const [mine, theirs] = [await row(copy), await row(passed.id)];
+  assert.deepEqual([mine.relevance, mine.title_zh, mine.category, mine.tags, mine.output.fact], [theirs.relevance, theirs.title_zh, theirs.category, theirs.tags, theirs.output.fact]);
+  assert.deepEqual([theirs.selected, mine.selected, mine.receipt_ids], [true, false, []], "a copy is never selected on its own");
+  assert.deepEqual([mine.output.copyOf, mine.output.distance], [passed.id, 0]);
+  const [p] = await sql`SELECT eligible, selected FROM publications WHERE article_id = ${copy}`;
+  assert.deepEqual({ ...p }, { eligible: false, selected: false }, "its original stands for it in the pool");
+
+  const blocked = await original("UNWANTED");
+  const blockedCopy = await reprint(blocked);
+  const before = provider.hits();
+  assert.equal((await processArticle(blockedCopy)).state, "block", "a blocked original has no grouping to wait for");
+  assert.equal(provider.hits(), before);
+  assert.equal((await row(blockedCopy)).output.copyOf, blocked.id);
+});
+
+test("a reprint of an original that is still being grouped waits for it", async () => {
+  const o = await original("REPRINT");
+  const copy = await reprint(o);
+  const hits = provider.hits();
+  assert.equal((await processArticle(copy)).state, "waiting-original");
+  const [waiting] = await sql`SELECT processing_state, processing_retry_at > now() + interval '4 minutes' AS later FROM articles WHERE id = ${copy}`;
+  assert.deepEqual({ ...waiting }, { processing_state: "new", later: true }, "the sweep looks again in a few minutes");
+  assert.equal((await sql`SELECT 1 FROM analyses WHERE article_id = ${copy}`).length, 0);
+  await grouped(o.id);
+  assert.equal((await processArticle(copy)).state, "pass");
+  assert.equal(provider.hits(), hits);
+  assert.equal((await row(copy)).output.copyOf, o.id);
+});
+
+test("only a source held to the same line or a higher one copies; the same source, a short text and a re-evaluation are judged in full", async () => {
+  const media = await original("REPRINT", REPRINTER);
+  await grouped(media.id);
+  assert.ok(await judgedInFull(await reprint(media, OFFICIAL)), "a first-party post is never a copy of a media article held to a higher threshold");
+
+  const official = await original("REPRINT");
+  await grouped(official.id);
+  const peer = await reprint(official, OFFICIAL);
+  await processArticle(peer);
+  assert.equal((await row(peer)).output.copyOf, official.id, "a source held to the same threshold copies");
+  assert.ok(await judgedInFull(await reprint(official, SOURCE)), "the same source");
+  assert.ok(await judgedInFull(await reprint(official), { attemptTag: `admin:${tag()}` }), "an explicit re-evaluation");
+
+  const short = await original("REPRINT", SOURCE, `REPRINT: ${words().slice(0, 100)}`);
+  await grouped(short.id);
+  assert.ok(await judgedInFull(await reprint(short)), "too short to tell a reprint from a coincidence");
+});
+
+test("an original an editor withdraws or corrects after it was found is not copied: the reprint is judged in full", async () => {
+  for (const moderate of [
+    async (id: string) => { await publishArticle(id); await sql`UPDATE publications SET visibility = 'withdrawn' WHERE article_id = ${id}`; },
+    (id: string) => sql`INSERT INTO editorial_overrides (article_id, fields, reason, version, updated_by) VALUES (${id}, '{"title":"更正"}', '更正', 1, 'test')`,
+  ]) {
+    const o = await original("REPRINT");
+    await grouped(o.id);
+    const copy = await reprint(o);
+    const input = (await loadAnalyzeInput(copy))!;
+    const h = fingerprint(copyText(input))!;
+    const found = (await findOriginal(h, input))!;
+    assert.equal(found.id, o.id);
+    await moderate(o.id);
+    assert.equal(await commitCopy(input, found, h), null);
+    assert.equal((await sql`SELECT 1 FROM analyses WHERE article_id = ${copy}`).length, 0, "nothing of the original's judgement is written");
+    assert.ok(await judgedInFull(copy));
+  }
 });

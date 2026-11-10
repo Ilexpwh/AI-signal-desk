@@ -5,6 +5,7 @@ import { ensureQueue, recordRun } from "@aihot/backend/jobs/queue";
 import { serverModules, type Scheduled } from "@aihot/backend/modules";
 import { sweepUnprocessed } from "@aihot/backend/jobs/content";
 import { translatePending } from "@aihot/backend/editorial/translate";
+import { shadowDecisions } from "@aihot/backend/editorial/shadow";
 import { adaptIntervals, scheduleDueSources } from "@aihot/backend/sources/collect";
 import { scheduleMpReconcile } from "@aihot/backend/sources/mp";
 import { followXRenames } from "@aihot/backend/sources/x-renames";
@@ -12,6 +13,7 @@ import { dajialaConfigured } from "@aihot/backend/providers/dajiala";
 import { refreshSourceIcons } from "@aihot/backend/sources/icons";
 import { computeHotRanking, snapshotHeat } from "@aihot/backend/events/hot";
 import { linkRelatedStories } from "@aihot/backend/events/consolidate";
+import { computeTopicTrends } from "@aihot/backend/events/trends";
 import { composeDueReports } from "@aihot/backend/reports/compose";
 import { dailyRetention } from "@aihot/backend/operations/retention";
 import { submitIndexNow } from "@aihot/backend/operations/indexnow";
@@ -28,9 +30,13 @@ const ENGINE_SCHEDULES: Scheduled[] = [
   { name: "content.sweep", cron: "*/5 * * * *", run: sweepUnprocessed },
   // Full-text translations of newly selected items (model calls; off with MODEL_CALLS_ENABLED=false).
   { name: "content.translate", cron: "*/5 * * * *", run: () => translatePending() },
+  // A decision model answering beside the model steps it shadows (the admin's model page; receipts only).
+  { name: "models.shadow", cron: "*/5 * * * *", run: () => shadowDecisions() },
   { name: "hot.rank", cron: "*/5 * * * *", run: () => computeHotRanking() },
   { name: "hot.snapshot", cron: "2 * * * *", run: () => snapshotHeat() },
   { name: "stories.links", cron: "12 * * * *", run: linkRelatedStories },
+  // Each topic's stories per Beijing day against its usual share (上升中), the last week's days again.
+  { name: "topics.trend", cron: "20 0 * * *", missed: "once", run: () => computeTopicTrends() },
   // Every issue that is due and not written yet, each from its edition time (site/site.ts EDITION_TIMES)
   // at the next half hour; a missed or failed one at the next run.
   { name: "reports.compose", cron: "0,30 * * * *", missed: "once", run: () => composeDueReports() },

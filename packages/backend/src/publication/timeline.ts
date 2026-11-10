@@ -10,7 +10,7 @@ import {
   ITEM_COLUMNS, ITEM_FROM, categoryCondition, channelCondition, tagCondition, toFeedItemSummary,
   type ItemRow,
 } from "./items.ts";
-import { evidenceCondition, foldableSelectionCondition, listedCondition, ownFactEvidenceCondition, selectedCondition } from "./scope.ts";
+import { coverageCondition, foldableSelectionCondition, ownFactEvidenceCondition, selectedCondition } from "./scope.ts";
 
 export interface TimelineQuery extends TimelineFilters {
   cursor?: string | null;
@@ -32,7 +32,7 @@ function binding(q: TimelineQuery): string {
 }
 
 /**
- * Public pool reports linked to the given facts, under the same
+ * Public pool reports and copies linked to the given facts, under the same
  * filters (non-selected included): the sets "另外 N 家也报道了" expands and the group counts come from.
  */
 async function groupPool(q: TimelineQuery, now: Date, factIds: number[]) {
@@ -41,7 +41,7 @@ async function groupPool(q: TimelineQuery, now: Date, factIds: number[]) {
     SELECT DISTINCT f.id AS fact_id, p.article_id, p.source_id
     FROM facts f JOIN fact_articles fa ON fa.fact_id = f.id JOIN publications p ON p.article_id = fa.article_id
     WHERE f.id IN ${sql(factIds)}
-      AND ${evidenceCondition()} AND ${listedCondition(now)} ${filterSql(q)}`;
+      AND ${coverageCondition(now)} ${filterSql(q)}`;
 }
 
 /**

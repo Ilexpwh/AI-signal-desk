@@ -1,6 +1,6 @@
 // A source's T1 label and its authority to speak for an event are separate inputs.
 import { sql } from "../db.ts";
-import { entityIdentity } from "../editorial/vocabulary.ts";
+import { entityIdentity, SUBJECT_SEPARATORS } from "../editorial/vocabulary.ts";
 
 export interface RepresentativeIdentity {
   source_tier: string;
@@ -15,7 +15,7 @@ export const REPRESENTATIVE_COLUMNS = sql`s.tier AS source_tier, s.config->>'pub
 export function representativePriority(row: Partial<RepresentativeIdentity>): number {
   if (row.source_tier === "T1") return 0;
   const owner = entityIdentity(row.owner_entity_id);
-  const subjects = row.fact_subject?.split(/[,，、;；+＋&＆/]/u).map((subject) => entityIdentity(subject)) ?? [];
+  const subjects = row.fact_subject?.split(SUBJECT_SEPARATORS).map((subject) => entityIdentity(subject)) ?? [];
   if (!owner || subjects.some((subject) => !subject) || !subjects.includes(owner)) return 3;
   if (row.publisher_role === "organization") return 1;
   if (row.publisher_role === "person") return 2;
@@ -29,6 +29,21 @@ export type RepresentativeRow = Partial<RepresentativeIdentity> & {
   score: number | null;
   timeline_at: Date;
 };
+
+/**
+ * 首发: of each fact's first-hand reports (`first_hand`: T1 or a verified account of the fact's own subject,
+ * representativePriority below 3), the earliest by publication time, ties by id.
+ */
+export function firstReleases<T extends { id: string; fact_id: number; at: Date; first_hand: boolean }>(rows: T[]): Set<string> {
+  const first = new Map<T["fact_id"], T>();
+  for (const r of rows) {
+    if (!r.first_hand) continue;
+    const seen = first.get(r.fact_id);
+    const gap = seen ? r.at.getTime() - seen.at.getTime() : -1;
+    if (gap < 0 || (gap === 0 && r.id < seen!.id)) first.set(r.fact_id, r);
+  }
+  return new Set([...first.values()].map((r) => r.id));
+}
 
 /** Within the caller's existing fact/candidate scope: T1, verified publisher, full text, score, time. */
 export function pickRepresentative<T extends RepresentativeRow>(rows: T[]): T {

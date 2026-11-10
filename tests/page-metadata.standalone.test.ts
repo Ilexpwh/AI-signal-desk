@@ -16,7 +16,9 @@
 //   says what readers search it by; or /daily/ stands as a page of its own (2026-11-08);
 // - 全部动态's later pages and an event page of a single report compete in search with the pages that stand
 //   for them, the first page and that report's own page, while their links stop being followed (2026-11-09);
-// - a daily whose lead was withdrawn is headed in search by a report its highlights were only filled with (2026-11-09).
+// - a daily whose lead was withdrawn is headed in search by a report its highlights were only filled with (2026-11-09);
+// - an article does not say which companies it is about or names, or names one without the Wikidata item that
+//   tells which company it is (2026-11-09).
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { after, before, test } from "node:test";
@@ -29,7 +31,8 @@ import { startWebServer, type WebServer } from "../apps/web/tests/web-server.ts"
 
 const at = "2026-10-04T08:00:00.000Z";
 const item: FeedItemSummary = { id: "metadata-fixture", title: "可核实的测试报道", summary: "报道摘要", reason: null, source: { name: "Fixture" }, publishedAt: at, timelineAt: at, category: "ai-models", tags: [], score: 80, selected: true, channel: "news", x: null };
-const detail: SiteItemDetail = { ...item, x: null, originalTitle: null, links: { original: "https://example.org/report" }, discoveredAt: at, story: null, readingMode: "full", author: null, body: { zh: "<p>可核实的测试正文。</p>", original: null, zhKind: "original", complete: true }, outline: [], relatedStories: [], topics: [], tagTopics: {}, daily: null, indexable: true, googleNoindex: false, markdownAvailable: true, group: null, hasTranslation: false, bodyLanguage: "zh", mentions: [] };
+const detail: SiteItemDetail = { ...item, x: null, originalTitle: null, links: { original: "https://example.org/report" }, discoveredAt: at, story: null, readingMode: "full", author: null, body: { zh: "<p>可核实的测试正文。</p>", original: null, zhKind: "original", complete: true }, outline: [], relatedStories: [], topics: [], tagTopics: {}, daily: null, indexable: true, googleNoindex: false, markdownAvailable: true, group: null, hasTranslation: false, bodyLanguage: "zh", mentions: [],
+  entities: { about: [{ id: "fixture-lab", name: "Fixture Lab", wikidata: "Q42" }], mentions: [{ id: "fixture-co", name: "Fixture Co", wikidata: null }] } };
 /** Article pages by id: the fixture, one kept from Google only, one kept from every engine. */
 const details: Record<string, SiteItemDetail> = {
   [item.id]: detail,
@@ -42,7 +45,7 @@ const citation = (available: boolean): ReportCitation => ({ itemId: available ? 
 const leadless = (): ReportDetail => ({ ...report("daily"), key: "2026-10-05", lead: null, leadItemId: null,
   sections: [{ label: "模型", summary: null, items: [citation(false)] }], highlights: [{ ...citation(true), itemId: "metadata-pick", title: "同一时段值得一看的报道" }] });
 const report = (kind: ReportKind): ReportDetail => ({ kind, key: kind === "daily" ? "2026-10-04" : kind === "weekly" ? "2026-W40" : "2026-10", issueNumber: 1, title: `${SITE.name} 测试刊物`, generatedAt: at, lead: { title: "本期已验证的重要变化", leadParagraph: "本期的导读与依据。" }, leadItemId: item.id, overview: null, highlights: [citation(true)], sections: [], flashes: [], cover: null, metrics: {}, readingMinutes: 1, prev: null, next: null, mentions: [] });
-const story: StoryDetail = { publicId: "metadata-story", title: "测试事件的最新进展", status: "settled", reportCount: 1, sourceCount: 1, firstReportAt: at, latestAt: at, digest: "当前可核实的事件综述。", digestUpdatedAt: "2026-10-04T09:00:00.000Z", summary: null, excerpt: null, latest: null, latestReport: null, whyHot: { participants48h: 0, newParticipants6h: 0, recentReports24h: 0, observationComplete: true, rank: null }, developments: [], officialReports: [], timeline: [{ id: item.id, title: item.title, summary: item.summary, source: { name: item.source.name, firstParty: true }, publishedAt: at, selected: true }], heat: [], related: [], topics: [], mentions: [] };
+const story: StoryDetail = { publicId: "metadata-story", title: "测试事件的最新进展", status: "settled", reportCount: 1, sourceCount: 1, singleSource: false, firstReportAt: at, latestAt: at, digest: "当前可核实的事件综述。", digestSentences: null, digestUpdatedAt: "2026-10-04T09:00:00.000Z", summary: null, excerpt: null, latest: null, latestReport: null, whyHot: { participants48h: 0, newParticipants6h: 0, recentReports24h: 0, observationComplete: true, rank: null }, developments: [], officialReports: [], timeline: [{ id: item.id, title: item.title, summary: item.summary, source: { name: item.source.name, firstParty: true }, publishedAt: at, selected: true, firstRelease: true }], heat: [], related: [], topics: [], mentions: [] };
 /** The same event once a second report joined it. */
 const severalReports: StoryDetail = { ...story, publicId: "metadata-story-several", reportCount: 2, sourceCount: 2 };
 let web: WebServer;
@@ -193,6 +196,14 @@ test("article metadata names its publisher, has a representative image and a dat
   assert.equal(undated.datePublished, "2026-10-04T07:30:00.000Z");
   const modified = "2026-10-04T10:00:00.000Z";
   assert.equal(articleLd({ path: "/items/test", headline: "更正", modifiedAt: modified }).dateModified, modified);
+});
+
+test("an article names the companies it is about and the others it mentions, by their Wikidata items where the site has them", async () => {
+  const article = structured(await page(`/items/${item.id}`)).find((entry) => entry["@type"] === "NewsArticle")!;
+  assert.deepEqual(article.about, [{ "@type": "Organization", name: "Fixture Lab", sameAs: "https://www.wikidata.org/wiki/Q42" }]);
+  assert.deepEqual(article.mentions, [{ "@type": "Organization", name: "Fixture Co" }], "a company without an item is named only");
+  const plain = articleLd({ path: "/items/test", headline: "没有公司", about: [], mentions: [] });
+  assert.deepEqual(["about" in plain, "mentions" in plain], [false, false]);
 });
 
 test("an article whose own text is a summary's worth asks only Google not to index it", async () => {

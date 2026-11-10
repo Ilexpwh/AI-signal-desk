@@ -1,6 +1,6 @@
 // Recall must keep the same evidence through a query-plan change: discovery defines the window,
 // live stories and membership roles define eligibility, and the latest analysis (revision, then id)
-// excludes composites even before publication catches up. Shared reports retain every fact.
+// excludes composites and copies even before publication catches up. Shared reports retain every fact.
 import { tag } from "./setup.ts";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -20,7 +20,7 @@ test("recall preserves window, live-story, membership and latest-analysis eviden
   const [merged] = await sql<{ id: number }[]>`INSERT INTO stories (public_id, title, first_report_at, latest_at, merged_into)
     VALUES (${randomUUID()}, ${title}, now(), now(), ${live!.id}) RETURNING id`;
   const expected: number[] = [];
-  for (const [index, scenario] of ["single", "missing-analysis", "unknown-scope", "composite", "latest-single", "latest-composite", "higher-revision", "old-discovery", "boundary", "recent-discovery", "mention", "merged", "shared"].entries()) {
+  for (const [index, scenario] of ["single", "missing-analysis", "unknown-scope", "composite", "latest-single", "latest-composite", "higher-revision", "old-discovery", "boundary", "recent-discovery", "mention", "merged", "copy", "shared"].entries()) {
     const id = `${T}-${scenario}`;
     await sql`INSERT INTO articles (id, source_id, identity_key, url, title, discovered_at, timeline_at, published_at)
       VALUES (${id}, ${T}, ${id}, ${`https://example.org/${id}`}, ${title},
@@ -35,7 +35,7 @@ test("recall preserves window, live-story, membership and latest-analysis eviden
     if (scenario !== "missing-analysis") {
       await sql`INSERT INTO analyses (article_id, input_revision, origin, title_zh, output)
         VALUES (${id}, ${scenario === "higher-revision" ? 2 : 1}, 'rule', ${title},
-          ${sql.json(scenario === "unknown-scope" ? {} : { scope: ["composite", "latest-single"].includes(scenario) ? "composite" : "single" })})`;
+          ${sql.json(scenario === "unknown-scope" ? {} : { scope: ["composite", "latest-single"].includes(scenario) ? "composite" : "single", ...(scenario === "copy" ? { copyOf: `${T}-single` } : {}) })})`;
       if (["latest-single", "latest-composite", "higher-revision"].includes(scenario)) {
         await sql`INSERT INTO analyses (article_id, input_revision, origin, title_zh, output)
           VALUES (${id}, 1, 'rule', ${title}, ${sql.json({ scope: scenario === "latest-single" ? "single" : "composite" })})`;
@@ -44,7 +44,7 @@ test("recall preserves window, live-story, membership and latest-analysis eviden
             a.discovered_at, a.timeline_at, a.timeline_at FROM articles a WHERE a.id = ${id}`;
       }
     }
-    if (!["composite", "latest-composite", "old-discovery", "boundary", "mention", "merged"].includes(scenario)) expected.push(fact!.id);
+    if (!["composite", "latest-composite", "old-discovery", "boundary", "mention", "merged", "copy"].includes(scenario)) expected.push(fact!.id);
     if (scenario === "shared") {
       const [second] = await sql<{ id: number }[]>`INSERT INTO facts (public_id, story_id, title)
         VALUES (${`${T}-shared-fact`}, ${live!.id}, ${title}) RETURNING id`;

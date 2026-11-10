@@ -1,6 +1,7 @@
 // Failure cases: two workers finish the same extraction; a report revises the article while a page
 // or X Article is in flight; an obsolete empty response marks new input unconfirmed; an admin
 // repeats extraction of unchanged HTML. Neither content nor revision history may go backwards.
+// A page Readability finds no article in, or one only a browser renders, is read for free before Jina.
 import { gate, Reply, stub, tag } from "./setup.ts";
 import assert from "node:assert/strict";
 import http from "node:http";
@@ -8,6 +9,7 @@ import { after, before, test } from "node:test";
 import { config } from "@aihot/backend/config";
 import { closeDb, sql } from "@aihot/backend/db";
 import { extractArticleBody, extractFromUrl, pageRules } from "@aihot/backend/content/extract";
+import { renderPage } from "@aihot/backend/providers/render";
 import { upsertMaterial } from "@aihot/backend/content/materials";
 import { getBoss, stopBoss } from "@aihot/backend/jobs/queue";
 import { queueProcessing, registerExtractionJobs } from "@aihot/backend/jobs/content";
@@ -37,6 +39,12 @@ const page = http.createServer(async (_req, res) => {
     res.writeHead(200, { "content-type": "application/rss+xml" });
     return res.end(`<rss version="2.0"><channel><title>Feed</title><item><title>RSS original</title><link>${base}/rss-original</link><content:encoded><![CDATA[${rssHtml}]]></content:encoded></item></channel></rss>`);
   }
+  // A client-rendered page: the article only in its structured data, or nowhere before a browser runs it.
+  if (_req.url === "/declared" || _req.url === "/shell") {
+    res.writeHead(200, { "content-type": "text/html" });
+    const data = _req.url === "/declared" ? `<script type="application/ld+json">${JSON.stringify({ "@type": "NewsArticle", headline: "Declared", articleBody: body.trim() })}</script>` : "";
+    return res.end(`<html><head><title>Declared</title>${data}</head><body><div id="root"><p>Loading…</p></div><noscript>Enable JavaScript to read this article.</noscript></body></html>`);
+  }
   if (--hold.count === 0) hold.entered.open();
   await hold.release.promise;
   res.writeHead(200, { "content-type": "text/html" });
@@ -50,6 +58,21 @@ const socialdata = await stub(async () => {
   if (hold.failed) return new Reply(503, { error: "Temporary extraction failure" });
   return hold.empty ? {} : { article: { title: "Old X Article", content_state: { blocks: [{ text: body }] } } };
 });
+// The self-hosted renderer (Crawl4AI's /crawl): every request is kept, the answer is the page as rendered.
+const renders: Array<{ path?: string; authorization?: string; urls: string[] }> = [];
+let rendered: Record<string, unknown> = {};
+const renderer = http.createServer((req, res) => {
+  const chunks: Buffer[] = [];
+  req.on("data", (c: Buffer) => chunks.push(c));
+  req.on("end", () => {
+    const { urls } = JSON.parse(Buffer.concat(chunks).toString());
+    renders.push({ path: req.url, authorization: req.headers.authorization, urls });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ success: true, results: [{ url: urls[0], success: true, status_code: 200,
+      html: `<html><head><title>Rendered</title></head><body><article><h1>Rendered</h1><p>${body}</p></article></body></html>`, ...rendered }] }));
+  });
+});
+await new Promise<void>(resolve => renderer.listen(0, "127.0.0.1", resolve));
 process.env.SOCIALDATA_API_KEY = "test-key";
 process.env.SOCIALDATA_BASE_URL = socialdata.url;
 process.env.JINA_API_KEY = "test-key";
@@ -60,7 +83,7 @@ before(async () => {
   // Jina stopped: a page without a readable body stays without one.
   await sql`UPDATE budgets SET per_minute=0,per_hour=0,per_day=0 WHERE service='jina'`;
 });
-after(async () => { page.close(); await socialdata.close(); await stopBoss(); await closeDb(); });
+after(async () => { page.close(); renderer.close(); await socialdata.close(); await stopBoss(); await closeDb(); });
 const reset = (count = 1, empty = false) => { presentationHtml = null; hold = { entered: gate(), release: gate(), count, empty }; };
 const state = async (id: string) => ({ ...(await sql`SELECT title,body_text,body_status,revision,content_hash FROM articles WHERE id=${id}`)[0] });
 
@@ -76,6 +99,44 @@ test("a source can read a text alternate without losing patch lines or mistaking
   assert.ok(got);
   assert.match(got.text, /\n-Old offer ended\n\+New free model credits <100>/);
   assert.match(got.html, /&lt;100&gt;/);
+});
+
+test("an article only Defuddle finds is the same free body in a detail read and in extraction", async () => {
+  const got = await extractFromUrl(`${base}/declared`, "test-declared", {}, { paidFallback: false });
+  assert.equal(got?.via, "defuddle", "Readability finds no article in the page");
+  assert.equal(got.text, body.trim());
+  const detail = await fetchDetail(`${base}/declared`, { id: sourceId, config: {} } as never, { date: true, title: false, summary: false, body: true });
+  assert.deepEqual(detail.body, got);
+  assert.equal(await extractFromUrl(`${base}/shell`, "test-shell", {}, { paidFallback: false }), null, "a page without the article has no body, not its placeholder text");
+});
+
+test("a page only a browser renders goes to the self-hosted renderer before Jina, never with a private address", async () => {
+  process.env.RENDER_URL = `http://127.0.0.1:${(renderer.address() as { port: number }).port}`;
+  process.env.RENDER_TOKEN = "render-token";
+  try {
+    assert.equal(await extractFromUrl(`${base}/shell`, "test-render", {}, { paidFallback: false }), null);
+    assert.equal(renders.length, 0, "a caller that wants only the page as fetched skips the renderer");
+    // Jina is stopped in this file, so a body here is the renderer's.
+    const got = await extractFromUrl(`${base}/shell`, "test-render", {});
+    assert.equal(got?.via, "render");
+    assert.ok(got.text.includes(body.trim()));
+    assert.deepEqual(renders, [{ path: "/crawl", authorization: "Bearer render-token", urls: [`${base}/shell`] }]);
+    config.allowPrivateNetworkFetch = false;
+    try {
+      assert.equal(await renderPage("http://10.0.0.8/article"), null);
+      assert.equal(renders.length, 1, "an address the fetcher refuses is never handed over");
+      rendered = { redirected_url: "http://169.254.169.254/latest/meta-data/", redirected_status_code: 200 };
+      assert.equal(await renderPage("http://203.0.114.10/article"), null, "nor is a page read that ended on one");
+      assert.equal(renders.length, 2);
+    } finally { config.allowPrivateNetworkFetch = true; rendered = {}; }
+    rendered = { html: `<html><body><article>${"x".repeat(9 * 1024 * 1024)}</article></body></html>` };
+    assert.equal(await renderPage(`${base}/shell`), null, "a page past the direct fetch's size limit is not read");
+    rendered = {};
+    delete process.env.RENDER_TOKEN;
+    const sent = renders.length;
+    assert.equal(await renderPage(`${base}/shell`), null);
+    assert.equal(renders.length, sent, "without a token nothing is sent to the renderer");
+  } finally { delete process.env.RENDER_URL; delete process.env.RENDER_TOKEN; }
 });
 
 for (const x of [false, true]) for (const empty of [false, true]) {

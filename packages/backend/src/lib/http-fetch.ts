@@ -140,6 +140,15 @@ export function requireOk(res: GuardedResponse, what?: string): GuardedResponse 
   return res;
 }
 
+/**
+ * The check guardedFetch makes on an address before fetching it, for an address another service fetches
+ * for us (the self-hosted renderer): private destinations are refused, the name resolved as an egress
+ * request would resolve it.
+ */
+export function assertEgressUrl(url: string): Promise<URL> {
+  return assertPublicUrl(url, config.allowPrivateNetworkFetch, proxied(new URL(url), "egress", []) ? egressResolver() : undefined);
+}
+
 /** How the collectors introduce themselves: the site's own crawler name and address (site/site.ts). */
 export const DEFAULT_UA = `Mozilla/5.0 (compatible; ${SITE.crawlerName}; +${config.siteUrl}/about)`;
 

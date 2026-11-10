@@ -14,6 +14,9 @@ import { publishArticleTx, setSeoDecision } from "../publication/publish.ts";
 import { emit } from "../modules.ts";
 import { requestRegroup } from "../events/corrections.ts";
 import { resetAutomatic } from "../events/group.ts";
+import { copiesOf } from "../editorial/copies.ts";
+import { groupingReset } from "../content/provenance.ts";
+import { latestCopyCondition } from "../publication/scope.ts";
 import { materialIdentityForUrl, contentHash, decideTimeline, explicitBackfill, isHistorical, updatePresentation, type MediaItem } from "../content/materials.ts";
 import { extractFromUrl, pageFetchable, pageRules } from "../content/extract.ts";
 import { PresentationMismatch, presentationCounts, rebaseTranslation } from "../content/presentation.ts";
@@ -199,15 +202,18 @@ export async function contentChain(id: string): Promise<Chain | null> {
   const [article] = await sql<Chain["article"][]>`
     SELECT a.id, a.source_id, a.url, a.identity_key, a.title, a.author, a.language, a.published_at, a.published_at_claim, a.discovered_at,
            a.timeline_at, a.backfill, a.body_status, a.revision, a.processing_state, a.processing_error, a.grouped_at, length(a.body_text) AS body_chars,
-           s.name AS source_name, s.kind AS source_kind, s.tier, s.participation_mode, s.site_fulltext, s.syndicate_fulltext
-    FROM articles a JOIN sources s ON s.id = a.source_id WHERE a.id = ${id}`;
+           s.name AS source_name, s.kind AS source_kind, s.tier, s.participation_mode, s.site_fulltext, s.syndicate_fulltext,
+           an.output->>'copyOf' AS copy_of, (an.output->>'distance')::int AS copy_distance
+    FROM articles a JOIN sources s ON s.id = a.source_id
+    LEFT JOIN LATERAL (SELECT x.output FROM analyses x WHERE x.article_id = a.id ORDER BY x.input_revision DESC, x.id DESC LIMIT 1) an ON true
+    WHERE a.id = ${id}`;
   if (!article) return null;
-  const [discoveries, revisions, analyses, publication, override, ledger, membership, decisions, deliveries, history] = await Promise.all([
+  const [discoveries, revisions, analyses, publication, override, ledger, membership, decisions, deliveries, history, copies] = await Promise.all([
     sql<Chain["discoveries"]>`SELECT source_id, via, discovered_at FROM article_discoveries WHERE article_id = ${id} ORDER BY discovered_at`,
     sql<Chain["revisions"]>`SELECT revision, title, content_hash, created_at FROM article_revisions WHERE article_id = ${id} ORDER BY revision DESC LIMIT 10`,
     sql<Chain["analyses"]>`
       SELECT an.id, an.origin, an.model, an.prompt_version, an.input_revision, an.relevance, an.category, an.score, an.selected, an.title_zh, an.reason_zh,
-             an.created_at,
+             an.created_at, an.output->'subjectGuard' AS subject_guard, an.output->'grounding' AS grounding,
              (SELECT coalesce(jsonb_agg(jsonb_build_object('id', r.id, 'status', r.status, 'service', r.service, 'model', r.model, 'cost', r.cost, 'at', r.created_at) ORDER BY r.id), '[]'::jsonb)
                 FROM receipts r WHERE r.id = ANY(an.receipt_ids)) AS receipts
       FROM analyses an WHERE an.article_id = ${id} ORDER BY an.created_at DESC LIMIT 10`,
@@ -220,8 +226,9 @@ export async function contentChain(id: string): Promise<Chain | null> {
     sql<Chain["decisions"]>`SELECT verdict, fact_id, story_id, receipt_id, candidates, created_at FROM grouping_decisions WHERE article_id = ${id} ORDER BY created_at DESC LIMIT 5`,
     sql<Chain["deliveries"]>`SELECT target_key, dedupe_key, status, attempts, response, created_at, sent_at FROM deliveries WHERE subject_id = ${id} ORDER BY created_at DESC`,
     auditHistory(`content:${id}`),
+    copiesOf(sql, id),
   ]);
-  return { article, discoveries, revisions, analyses, publication: publication[0] ?? null, override: override[0] ?? null, ledger, membership, decisions, deliveries, history };
+  return { article, discoveries, revisions, analyses, publication: publication[0] ?? null, override: override[0] ?? null, ledger, membership, decisions, deliveries, history, copies };
 }
 
 /** Whether the current hot ranking shows the article: as an event's representative or among its reports. */
@@ -243,6 +250,38 @@ async function overrideRow(id: string, tx: Tx) {
   return o ?? { fields: {}, visibility: null, version: 0 };
 }
 
+/** Starts a pipeline step again for the current revision. */
+async function restart(tx: Tx, id: string, step: "extract" | "analyze", attemptTag?: string) {
+  await tx`UPDATE articles SET processing_state = 'new', processing_error = NULL, processing_attempts = 0, processing_retry_at = NULL,
+              body_status = CASE WHEN ${step === "extract"} THEN 'pending' ELSE body_status END WHERE id = ${id}`;
+  return queueProcessing(id, { step, ...(attemptTag ? { attemptTag } : {}), db: tx });
+}
+
+/**
+ * A copy joined its original's fact without a judgement: about to be judged again, it leaves that place
+ * and is grouped afresh after the new judgement. The caller holds the copy's row lock.
+ */
+async function releaseCopy(tx: Tx, id: string) {
+  await resetAutomatic(tx, id);
+  await tx`UPDATE articles SET ${groupingReset()} WHERE id = ${id}`;
+  const published = await publishArticleTx(tx, id);
+  if (published?.changed) await emit("articleChanged", { id, kind: "content", reduced: published.reduced, reason: "copy re-evaluated" }, tx);
+}
+
+/**
+ * The copies of an original took its judgement as it stood (editorial/copies.ts). Once an editor withdraws
+ * or corrects it, that is no longer the site's judgement: each copy is judged again, and the copy check
+ * now passes this original over. The caller holds the original's row lock (overrideRow), which the copy
+ * check takes before it commits a copy.
+ */
+async function requeueCopies(tx: Tx, originalId: string) {
+  for (const { id } of await copiesOf(tx, originalId)) {
+    await tx`SELECT id FROM articles WHERE id = ${id} FOR UPDATE`;
+    await releaseCopy(tx, id);
+    await restart(tx, id, "analyze");
+  }
+}
+
 /**
  * Public / summary-only / withdrawn. Applies to the site, API, RSS, MCP, the sync ledger and the
  * search index through the one publication projection; ETags change with the content.
@@ -256,6 +295,7 @@ export async function setVisibility(id: string, input: { visibility: "public" | 
       INSERT INTO editorial_overrides (article_id, visibility, reason, version, updated_by) VALUES (${id}, ${input.visibility}, ${input.reason}, 1, ${actor})
       ON CONFLICT (article_id) DO UPDATE SET visibility = EXCLUDED.visibility, reason = EXCLUDED.reason, version = editorial_overrides.version + 1, updated_by = EXCLUDED.updated_by, updated_at = now()`;
     const published = await publishArticleTx(tx, id);
+    await requeueCopies(tx, id);
     let hot = false;
     if (published?.reduced || (before.visibility ?? "public") !== input.visibility) {
       hot = await inHotRanking(id, tx);
@@ -312,6 +352,7 @@ export async function overrideFields(id: string, input: { fields: unknown; clear
       INSERT INTO editorial_overrides (article_id, fields, reason, version, updated_by) VALUES (${id}, ${tx.json(next as never)}, ${input.reason}, 1, ${actor})
       ON CONFLICT (article_id) DO UPDATE SET fields = EXCLUDED.fields, reason = EXCLUDED.reason, version = editorial_overrides.version + 1, updated_by = EXCLUDED.updated_by, updated_at = now()`;
     const published = await publishArticleTx(tx, id);
+    await requeueCopies(tx, id);
     if (published?.changed) {
       await emit("articleChanged", { id, kind: "content", reduced: published.reduced, reason: "manual correction" }, tx);
       const changedFields = new Set([...Object.keys(fields), ...(input.clear ?? [])]);
@@ -349,9 +390,9 @@ export async function rerun(id: string, step: AdminRerun["step"], requestId: str
     let jobId: string | null;
     if (step === "group") jobId = await requestRegroup(id, requestId, tx);
     else {
-      await tx`UPDATE articles SET processing_state = 'new', processing_error = NULL, processing_attempts = 0, processing_retry_at = NULL,
-                  body_status = CASE WHEN ${step === "extract"} THEN 'pending' ELSE body_status END WHERE id = ${id}`;
-      jobId = await queueProcessing(id, { step, ...(step === "analyze" ? { attemptTag: `admin:${requestId}` } : {}), db: tx });
+      // Re-evaluated, a copy is judged in full on its own (the attempt tag skips the copy check).
+      if (step === "analyze" && (await tx`SELECT 1 WHERE ${latestCopyCondition(sql`${id}`)}`).length) await releaseCopy(tx, id);
+      jobId = await restart(tx, id, step, step === "analyze" ? `admin:${requestId}` : undefined);
     }
     await audit(actor, `content.rerun.${step}`, `content:${id}`, null, null, { jobId, requestId }, { requestId, db: tx });
     return { jobId };

@@ -5,7 +5,8 @@
 // - an article's tags send readers and crawlers to filtered lists that search engines are kept from although
 //   a topic page covers the tag, or a tag repeats the topic chip beside it;
 // - an event page shows no date of its own: when it was first reported, in Beijing time, and of which year
-//   when not this one.
+//   when not this one;
+// - an event's digest does not lead from each sentence to the reports it rests on.
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import * as cheerio from "cheerio";
@@ -25,12 +26,21 @@ const items: SiteItemDetail[] = [
 // A minute ago: this year's, unless the test runs in the first minute of one.
 const recent = new Date(Date.now() - 60_000).toISOString();
 const story = (publicId: string, firstReportAt: string | null): StoryDetail => ({
-  publicId, title: "测试事件", status: "settled", reportCount: 61, sourceCount: 20, firstReportAt, latestAt: firstReportAt ?? FIXTURE_AT, digest: null, digestUpdatedAt: null,
+  publicId, title: "测试事件", status: "settled", reportCount: 61, sourceCount: 20, singleSource: false, firstReportAt, latestAt: firstReportAt ?? FIXTURE_AT, digest: null, digestSentences: null, digestUpdatedAt: null,
   summary: null, excerpt: null, latest: null, latestReport: null,
   whyHot: { participants48h: 0, newParticipants6h: 0, recentReports24h: 0, observationComplete: true, rank: null },
   developments: [], officialReports: [], timeline: [], heat: [], related: [], topics: [], mentions: [],
 });
-const stories = [story("links-this-year", recent), story("links-last-year", "2025-12-30T17:00:00.000Z"), story("links-undated", null)];
+const cite = (n: number, id: string) => ({ n, id, title: `报道 ${n} 的标题`, sourceName: `来源 ${n}` });
+const cited: StoryDetail = {
+  ...story("links-cited", recent), digest: "第一句。第二句。\n\n第三句。",
+  digestSentences: [
+    { text: "第一句。", newParagraph: false, cites: [cite(1, "links-lead")] },
+    { text: "第二句。", newParagraph: false, cites: [cite(1, "links-lead"), cite(2, "links-entry")] },
+    { text: "第三句。", newParagraph: true, cites: [cite(2, "links-entry")] },
+  ],
+};
+const stories = [story("links-this-year", recent), story("links-last-year", "2025-12-30T17:00:00.000Z"), story("links-undated", null), cited];
 
 let web: WebServer;
 before(async () => {
@@ -95,4 +105,14 @@ test("an event page says when it was first reported, by the Beijing day and its 
   }
   const undated = await page("/story/links-undated");
   assert.ok(!undated("h1").closest("header").text().includes("首报"));
+});
+
+test("an event's digest links each sentence to the reports it cites, a report keeping its number", async () => {
+  const $ = await page("/story/links-cited");
+  const paragraphs = $("#event-overview p").filter((_, el) => $(el).text().includes("句")).toArray();
+  const marks = (p: (typeof paragraphs)[number]) => $(p).find("a").toArray().map((a) => [$(a).attr("href"), $(a).text(), $(a).attr("aria-label")]);
+  const first = ["/items/links-lead", "1", "出处 1：来源 1《报道 1 的标题》"];
+  const second = ["/items/links-entry", "2", "出处 2：来源 2《报道 2 的标题》"];
+  assert.deepEqual(paragraphs.map(marks), [[first, first, second], [second]]);
+  assert.ok($(paragraphs[1]).text().startsWith("第三句。"), "a new paragraph opens where the digest starts one");
 });

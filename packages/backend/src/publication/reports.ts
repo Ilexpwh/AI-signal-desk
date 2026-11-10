@@ -10,6 +10,7 @@ import { dailyUrl, itemUrl, periodUrl, siteUrl } from "./links.ts";
 import { publicSourceName } from "./rules.ts";
 import { listedCondition } from "./scope.ts";
 import { mentionsIn } from "./mentions.ts";
+import { topicLinks } from "./topics.ts";
 
 export type { ReportKind };
 
@@ -370,6 +371,14 @@ function issueAsShown(kind: ReportKind, c: Record<string, any>, avail: Map<strin
   return { sections, all, highlights, flashes, gone, hasCitedLead, named, leadItem, leadItemId };
 }
 
+/** A weekly's 上升中 as it was written, under the topics' current names; a topic the site no longer has is left out. */
+function issueRising(c: Record<string, any>): NonNullable<ReportDetail["rising"]> {
+  return (c.rising ?? []).flatMap((r: any) => {
+    const [link] = topicLinks([String(r.topic)]);
+    return link ? [{ ...link, day: String(r.day), stories: Number(r.stories), ratio: Number(r.ratio) }] : [];
+  });
+}
+
 export async function loadReport(kind: ReportKind, key: string): Promise<ReportDetail | null> {
   // Its number counts every issue of the kind up to it, as the index numbers them (reportIndexRows).
   const [r] = await sql<(Pick<ReportRow, "content" | "generated_at"> & { issue_number: number })[]>`
@@ -414,6 +423,7 @@ export async function loadReport(kind: ReportKind, key: string): Promise<ReportD
     next,
     // The texts the issue's page draws: its lead, overview and each section's summary and stories.
     mentions: await mentionsIn([lead?.leadParagraph, overview, ...sections.flatMap((s) => [s.summary, ...s.items.map((i) => i.summary)])]),
+    ...(kind === "weekly" ? { rising: issueRising(c) } : {}),
   };
 }
 

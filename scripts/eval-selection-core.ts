@@ -1,7 +1,7 @@
 // Selection evaluation cases (one human gold decision per line) and their metrics. Whether a case is
 // selected is the site's own rule (editorial/analyze.ts), never a copy of it.
 import { z } from "zod";
-import { scoresSelect, type AnalysisRun } from "@aihot/backend/editorial/analyze";
+import { decidingScores, scoresSelect, type AnalysisRun } from "@aihot/backend/editorial/analyze";
 import { binaryMetrics, nonEmpty, nullableString, parseCasesJsonl, round, SamplingContext } from "./eval-tools.ts";
 
 /** "either": both decisions are acceptable; such cases stay out of the decisive metrics. */
@@ -80,11 +80,14 @@ export interface SelectionThresholdCase {
   scores: AnalysisRun["scores"];
 }
 
-/** The decisions had every case been held against `threshold` instead of its source tier's. */
+/**
+ * The decisions had every case been held against `threshold` instead of its source tier's, with the
+ * scores production would have asked at that threshold (decidingScores).
+ */
 export function selectionThresholdMetrics(cases: SelectionThresholdCase[], threshold: number) {
   const metrics = selectionMetrics(cases.map((row) => ({
     gold: row.gold,
-    decision: row.available ? (row.passed && scoresSelect(row.scores, threshold) ? "select" : "reject") : null,
+    decision: row.available ? (row.passed && scoresSelect(decidingScores(row.scores, threshold), threshold) ? "select" : "reject") : null,
   })));
   return {
     t: threshold,

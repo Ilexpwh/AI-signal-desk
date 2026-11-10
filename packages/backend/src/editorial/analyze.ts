@@ -5,12 +5,18 @@ import { describePublicationTime } from "../sources/dates.ts";
 // revision before any step.
 //   1. prefilter: does the material belong to this industry at all (wide recall). Only BLOCK stops an
 //      item; a BLOCK on an original post without text counts as UNKNOWN;
-//   2. score: two independent scores against the source's threshold (tier and class, industry/selection.ts) decide 精选;
+//   2. score: independent scores against the source's threshold (tier and class, industry/selection.ts) decide 精选;
+//      each call returns the content type and five axes, weighed here by the type's row in industry/selection.ts;
+//      a second score is asked only when the first lies near a line it decides (secondScoreWithin);
 //   3. structure: category, tags, subjects and the current news fact, beside scoring;
 //   4. writing, once the structure is in: the Chinese title, summary and reason by the content
 //      understanding for selected and near-selected items, by the cheaper title/summary prompts for the rest;
-//      copy that uses a word the site keeps from readers (industry/wording.ts) goes back once to change only those.
+//      copy that uses a word the site keeps from readers (industry/wording.ts) goes back once to change only those;
+//   5. checks of the copy, recorded only (nothing changes for readers): whether the title names the company of the
+//      fact (code), and, for the content understanding's copy, each of its claims against the material (one more call).
 // Material with only a title or a feed summary has its article page fetched before it is judged.
+// Material that repeats an article another source already had judged takes that judgement instead, with
+// none of these steps (copies.ts, checked by the analysis job).
 import { z } from "zod";
 import { CATEGORY_KEYS } from "@aihot/contracts/taxonomy";
 import { CATEGORIES } from "@aihot/industry/taxonomy";
@@ -18,7 +24,7 @@ import { SELECTION } from "@aihot/industry/selection";
 import { ITEM_COPY } from "@aihot/site";
 import { sql } from "../db.ts";
 import { chatJson, MODELS, type ContentPart } from "../providers/llm.ts";
-import { completeReceipt, failedReceiptId, failureKind } from "../providers/receipts.ts";
+import { completeReceipt, failedReceiptId, failureKind, type FailureKind } from "../providers/receipts.ts";
 import { collapseWhitespace } from "../lib/text.ts";
 import { modelFor, modelRoute, modelSupportsVision } from "./models.ts";
 import { buildMaterial, firstImagePart, loadAnalyzeInput, type AnalyzeInputArticle } from "./input.ts";
@@ -26,13 +32,14 @@ import { pageFetchable } from "../content/extract.ts";
 import { shutdownSignal } from "../jobs/queue.ts";
 import {
   buildArticlePrompt, buildLongTweetPrompt, buildShortTweetPrompt, finalizeCopy, isShortTweetInput, looksZh, MAX_BODY_CHARS, missingEvidence,
-  needsShortTweetTranslation, parseTranslateOutput, PREFILTER_SYSTEM, prefilterUser, translateInputOf, UNDERSTAND_SYSTEM, understandUser,
+  needsShortTweetTranslation, parseTranslateOutput, PREFILTER_SYSTEM, prefilterUser, subjectGuard, translateInputOf, UNDERSTAND_SYSTEM, understandUser,
   type IdentityGuard,
 } from "./writing.ts";
-import { CATEGORY_GUIDE, CATEGORY_TAGS, ENTITIES, ENTITY_TAGS, ITEM_TYPES, normalizeTags, TOPIC_TAGS } from "./vocabulary.ts";
+import { CATEGORY_GUIDE, CATEGORY_TAGS, ENTITIES, ENTITY_TAGS, ITEM_TYPES, normalizeTags, TOPIC_TAGS, unmatchedSubjects } from "./vocabulary.ts";
 import { promptText, promptVersion } from "./prompts.ts";
 import { originalPostCopy } from "../content/posts.ts";
 import { wordingProblems } from "./wording.ts";
+import { copyText, fingerprint } from "./copies.ts";
 
 export { buildMaterial, loadAnalyzeInput, type AnalyzeInputArticle };
 
@@ -43,6 +50,7 @@ export const PROMPT_VERSIONS = {
   summarize: promptVersion("summarize-article", "summarize-article-empty", "summarize-short-post", "summarize-short-post-quoted", "summarize-long-post", "summarize-long-post-quoted", "identity-context"),
   structure: promptVersion("structure"),
   wording: promptVersion("mend-wording"),
+  verify: promptVersion("verify-copy"),
 } as const;
 /** Every step's prompt, as stored on each judgement. */
 export const SELECTION_PROMPT_VERSION = [PROMPT_VERSIONS.prefilter, PROMPT_VERSIONS.score].join("+");
@@ -50,12 +58,12 @@ export const ANALYZE_PROMPT_VERSION = Object.values(PROMPT_VERSIONS).join("+");
 
 // Scoring
 
-/** Independent score calls per article; their sum decides, their mean (floored) is shown. */
+/** The most independent score calls per article; their mean decides, and is shown floored. */
 export const SCORE_CALLS = 2;
 
 /**
  * The threshold on the mean score for a source (industry/selection.ts): its tier's, raised to its
- * class's floor; a class never lowers it. Selected when score1 + score2 >= 2 × threshold. Tiers
+ * class's floor; a class never lowers it. Selected when the mean of the scores reaches it. Tiers
  * without a threshold are not scored for 精选.
  */
 export function selectionThreshold(source: { tier: string; selectionClass?: string | null }): number | null {
@@ -67,13 +75,45 @@ export function selectionThreshold(source: { tier: string; selectionClass?: stri
 /** Unselected items above this mean are written like selected ones. */
 export const UNDERSTAND_FLOOR = SELECTION.understandFloor;
 
+/**
+ * A second score is asked only when the first lies within `secondScoreWithin` of a line a score decides:
+ * the source's threshold (精选), the understand floor (how it is written) or the browse floor (全部动态).
+ */
+export function needsSecondScore(first: number, threshold: number): boolean {
+  return [threshold, UNDERSTAND_FLOOR, SELECTION.browseFloor].some((line) => Math.abs(first - line) < SELECTION.secondScoreWithin);
+}
+
 /** Call parameters of the score step, unless the model sets its own (the site's preset, `scoreCall`). */
 const scoreCall = (model: string) => MODELS[model]?.scoreCall ?? { temperature: 0.2, maxTokens: 1024, timeoutMs: 120_000 };
 
 /** The score prompt: the industry's taste (industry/prompts/selection-score.md). */
 export const SCORE_SYSTEM = promptText("selection-score");
 
-export const ScoreSchema = z.object({ attentionScore: z.coerce.number().int().min(0).max(100) });
+export const AXES = ["sig", "nov", "cred", "reson", "act"] as const;
+const Axis = z.coerce.number().int().min(0).max(10);
+
+/** One score call's answer: the content type and the five axes of the rubric; the total is weighed here, not by the model. */
+export const ScoreSchema = z.object({
+  itemType: z.preprocess((v) => String(v ?? "").trim(), z.enum(ITEM_TYPES)),
+  sig: Axis, nov: Axis, cred: Axis, reson: Axis, act: Axis,
+  thin: z.boolean(),
+});
+export type ScoreAxes = z.infer<typeof ScoreSchema>;
+
+// A type's weights are whole and sum to 10, so five 0–10 axes always weigh into 0–100.
+for (const [type, row] of Object.entries(SELECTION.weights)) {
+  const weights = AXES.map((k) => row[k]);
+  if (weights.some((w) => !Number.isInteger(w) || w < 0) || weights.reduce((s, w) => s + w, 0) !== 10) {
+    throw new Error(`industry/selection.ts weights.${type}: five whole, non-negative weights that sum to 10`);
+  }
+}
+
+/** One call's score: its content type's weighted axes, held to `thinCap` when the material is too thin to judge. */
+export function weighedScore(s: ScoreAxes): number {
+  const w = SELECTION.weights[s.itemType];
+  const total = AXES.reduce((sum, k) => sum + s[k] * w[k], 0);
+  return s.thin ? Math.min(total, SELECTION.thinCap) : total;
+}
 
 const SCORE_TIME = new Intl.DateTimeFormat("sv-SE", {
   timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
@@ -90,6 +130,11 @@ export function scoreInputTime(at: Date): string {
  * original title (items are scored before any Chinese copy exists) and the whole body.
  */
 export function buildScoreInput(a: AnalyzeInputArticle): string {
+  return ["请按系统规则评估以下单篇材料所代表的事件。只输出系统规则要求的 JSON。", scoreMaterial(a, MAX_BODY_CHARS)].join("\n\n");
+}
+
+/** The material the score judges: its publication time, title and body (the body cut at `maxChars`). */
+export function scoreMaterial(a: AnalyzeInputArticle, maxChars: number): string {
   let body: string;
   if (a.xPost) {
     const quoted = a.xPost.quoted?.text ? `\n\n[引用 ${a.xPost.quoted.handle ? `@${a.xPost.quoted.handle}` : "原推文"}]：${a.xPost.quoted.text}` : "";
@@ -100,10 +145,9 @@ export function buildScoreInput(a: AnalyzeInputArticle): string {
   if (!body) body = a.title;
   const at = a.publishedAt;
   return [
-    "请按系统规则评估以下单篇材料所代表的事件。只输出 attentionScore。",
     `【发布时间（北京时间）】\n${at ? a.publicationTime === undefined || a.publicationTime?.includes("T") ? scoreInputTime(at) : describePublicationTime(at, a.publicationTime) : "未知（收录时间不代表发布时间）"}`,
     `【标题】\n${a.title.trim()}`,
-    `【完整正文】\n${body.length > MAX_BODY_CHARS ? body.slice(0, MAX_BODY_CHARS) : body}`,
+    `【完整正文】\n${body.length > maxChars ? body.slice(0, maxChars) : body}`,
   ].join("\n\n");
 }
 
@@ -163,18 +207,33 @@ export const STRUCTURE_SYSTEM = promptText("structure", {
   entities: Object.entries(ENTITIES).map(([id, e]) => `${id}（${e.aliases.slice(0, 3).join("/")}）`).join("，"),
 });
 
-/** Keep only quotes present both in the original material and in the text the structure model saw. */
-export function normalizeStructure(data: z.infer<typeof StructureSchema>, a: AnalyzeInputArticle) {
+/** The material's own text: the body, or the post and the post it quotes (whitespace collapsed). */
+const originalTexts = (a: AnalyzeInputArticle) => (a.xPost
+  ? [String(a.xPost.text ?? a.title), String(a.xPost.quoted?.text ?? "")]
+  : [a.bodyText ?? a.excerpt ?? ""]).map(collapseWhitespace);
+
+/**
+ * A quote from the material as a model saw it (buildMaterial), kept only when it is present both there and in the
+ * original material itself (not the source, the title or a translation); null otherwise.
+ */
+function groundedIn(a: AnalyzeInputArticle) {
   const visible = collapseWhitespace(buildMaterial(a));
-  const originals = (a.xPost
-    ? [String(a.xPost.text ?? a.title), String(a.xPost.quoted?.text ?? "")]
-    : [a.bodyText ?? a.excerpt ?? ""]).map(collapseWhitespace);
-  // A title is not the unseen contents of a video/article, regardless of the model's confidence.
-  const scope = originals.some(Boolean) ? data.scope : "unknown";
-  const grounded = (quote: string | null | undefined) => {
+  const originals = originalTexts(a);
+  return (quote: string | null | undefined) => {
     const text = collapseWhitespace(quote ?? "");
     return text && visible.includes(text) && originals.some((original) => original.includes(text)) ? text : null;
   };
+}
+
+/**
+ * Keep only quotes present both in the original material and in the text the structure model saw. The fact
+ * subject's names that are no company of the vocabulary are kept apart, for the admin's 未收录主体 list.
+ */
+export function normalizeStructure(data: z.infer<typeof StructureSchema>, a: AnalyzeInputArticle) {
+  const originals = originalTexts(a);
+  // A title is not the unseen contents of a video/article, regardless of the model's confidence.
+  const scope = originals.some(Boolean) ? data.scope : "unknown";
+  const grounded = groundedIn(a);
   const fact = !originals.some(Boolean) || scope === "composite" || !data.fact ? null : {
     ...data.fact,
     evidence: grounded(data.fact.evidence),
@@ -187,7 +246,7 @@ export function normalizeStructure(data: z.infer<typeof StructureSchema>, a: Ana
   return {
     category: data.category, tags: normalizeTags(data.tags),
     subjects: [...new Set(data.subjects.map((s) => s.trim().toLowerCase()).filter((s) => s in ENTITIES))],
-    scope, fact,
+    scope, fact, unmatchedSubjects: unmatchedSubjects(fact?.subject),
   };
 }
 
@@ -198,7 +257,7 @@ export interface AnalysisRun {
    * The independent score calls and the source's threshold they are held against; absent when the material
    * is not scored. `refused`: the model's content filter declined it, so it is not selected.
    */
-  scores: { model: string; threshold: number; values: number[]; receiptIds: number[]; reused: boolean; refused?: boolean } | null;
+  scores: { model: string; threshold: number; values: number[]; axes: ScoreAxes[]; receiptIds: number[]; reused: boolean; refused?: boolean } | null;
   /** The reader-facing copy: `understand` (selected, near-selected), `summarize`, `verbatim` (a Chinese short post), `none`. */
   writing: {
     kind: "understand" | "summarize" | "verbatim" | "none";
@@ -213,6 +272,8 @@ export interface AnalysisRun {
     reused: boolean;
   } | null;
   structure: (ReturnType<typeof normalizeStructure> & { model: string; receiptId: number; reused: boolean }) | null;
+  /** The content understanding's copy checked claim by claim against the material (verifyCopy); `failed` when the check could not be had. */
+  grounding: { model: string; claims: Claim[]; receiptId: number; reused: boolean } | { failed: FailureKind } | null;
 }
 
 const isContentFilter = (error: unknown) => failureKind(error) === "refused" && /contentFilter|"1301"/.test((error as Error).message);
@@ -222,13 +283,15 @@ export function waitsForPage(a: AnalyzeInputArticle): boolean {
   return a.bodyStatus === "pending" && !a.bodyText && !a.xPost && pageFetchable(a.url, a.source.kind);
 }
 
-type StepOpts = { attemptTag?: string; scoreModel?: string };
+/** `allScores`: an evaluation asks every score call, and replays the production rule with decidingScores. */
+type StepOpts = { attemptTag?: string; scoreModel?: string; allScores?: boolean };
 type ReceiptObserver = (receiptId: number) => void;
 
 /** A stopping worker finishes the stage it is in, never starts the next. */
 const checkAnalysisRunning = () => shutdownSignal.signal.throwIfAborted();
 
-const subjectOf = (a: AnalyzeInputArticle) => `article:${a.id}@${a.revision}`;
+/** The receipt subject of an article revision, shared by every step that judges it. */
+export const subjectOf = (a: Pick<AnalyzeInputArticle, "id" | "revision">) => `article:${a.id}@${a.revision}`;
 const tagged = (attemptTag: string | undefined, step: string) => [attemptTag, step].filter(Boolean).join(":") || undefined;
 
 async function runPrefilter(a: AnalyzeInputArticle, opts: StepOpts): Promise<NonNullable<AnalysisRun["prefilter"]>> {
@@ -278,10 +341,12 @@ async function runScores(
   const call = scoreCall(model);
   const input = buildScoreInput(a);
   const values: number[] = [];
+  const axes: ScoreAxes[] = [];
   const receiptIds: number[] = [];
   let reused = true;
-  // One after the other: the second call reuses the provider's cached prompt.
+  // One after the other: the second call reuses the provider's cached prompt, and is not asked when the first decides alone.
   for (let i = 0; i < SCORE_CALLS; i++) {
+    if (i > 0 && !opts.allScores && !needsSecondScore(values[0]!, threshold)) break;
     checkAnalysisRunning();
     try {
       const res = await chatJson({
@@ -291,18 +356,19 @@ async function runScores(
         attemptTag: tagged(opts.attemptTag, `score-${i + 1}`),
       });
       onReceipt?.(res.receiptId);
-      values.push(res.data.attentionScore);
+      values.push(weighedScore(res.data));
+      axes.push(res.data);
       receiptIds.push(res.receiptId);
       reused &&= res.reused;
     } catch (error) {
       const receiptId = failedReceiptId(error);
       if (receiptId !== null) onReceipt?.(receiptId);
       // The model's content filter declines the material (Zhipu 1301): not scored, so not selected.
-      if (isContentFilter(error)) return { model, threshold, values, receiptIds, reused: false, refused: true };
+      if (isContentFilter(error)) return { model, threshold, values, axes, receiptIds, reused: false, refused: true };
       throw error;
     }
   }
-  return { model, threshold, values, receiptIds, reused };
+  return { model, threshold, values, axes, receiptIds, reused };
 }
 
 /** The production score step; its threshold stays case-specific even when an evaluator shares model output. */
@@ -415,6 +481,44 @@ async function mendWording(a: AnalyzeInputArticle, w: NonNullable<AnalysisRun["w
   return { ...w, ...mended, identityGuard: copy.identityGuard ?? w.identityGuard, ...paid };
 }
 
+export const VERIFY_SYSTEM = promptText("verify-copy");
+const ClaimSchema = z.object({
+  part: z.preprocess((v) => String(v ?? "").trim().toLowerCase(), z.enum(["title", "summary"])),
+  text: z.string().trim().min(1).max(200),
+  verdict: z.preprocess((v) => String(v ?? "").trim().toLowerCase(), z.enum(["supported", "unsupported", "unclear"])),
+  quote: z.string().max(600).nullable().catch(null),
+});
+type Claim = z.infer<typeof ClaimSchema>;
+const VerifySchema = z.object({ claims: z.array(ClaimSchema).max(20) });
+
+/**
+ * The content understanding's title and summary, claim by claim against the material (industry/prompts/verify-copy.md).
+ * A quote must be found as the structure's are (groundedIn): a claim citing one that is not, or supported without
+ * one, counts as unclear. Only recorded: a check that cannot be had leaves the copy and the judgement as they are.
+ */
+async function verifyCopy(a: AnalyzeInputArticle, w: NonNullable<AnalysisRun["writing"]>, opts: StepOpts): Promise<AnalysisRun["grounding"]> {
+  if (w.kind !== "understand" || !w.titleZh || !w.summaryZh) return null;
+  checkAnalysisRunning();
+  try {
+    const res = await chatJson({
+      model: await modelFor("verify"), purpose: "verify_copy", subject: subjectOf(a), promptVersion: PROMPT_VERSIONS.verify, system: VERIFY_SYSTEM,
+      user: [buildMaterial(a), `中文稿：\n${JSON.stringify({ titleZh: w.titleZh, summaryZh: w.summaryZh })}`].join("\n\n"),
+      schema: VerifySchema, temperature: 0, maxTokens: 4096, attemptTag: tagged(opts.attemptTag, "verify"),
+    });
+    const grounded = groundedIn(a);
+    const claims = res.data.claims.map((c): Claim => {
+      const quote = grounded(c.quote) || null;
+      const unfound = c.quote?.trim() ? !quote : c.verdict === "supported";
+      return { ...c, verdict: unfound ? "unclear" : c.verdict, quote };
+    });
+    return { model: res.model, claims, receiptId: res.receiptId, reused: res.reused };
+  } catch (error) {
+    // A stopping worker still stops before the commit; any other failure is recorded, and the next analysis asks again.
+    if (shutdownSignal.signal.aborted) throw error;
+    return { failed: failureKind(error) };
+  }
+}
+
 /** The title/summary prompts (articles, long and short posts). */
 async function runSummarize(a: AnalyzeInputArticle, opts: StepOpts): Promise<NonNullable<AnalysisRun["writing"]>> {
   const t = translateInputOf(a);
@@ -456,40 +560,49 @@ export function awaitsMaterial(a: AnalyzeInputArticle): boolean {
   return missingEvidence(a) && !originalPostCopy(a.xPost, a.url);
 }
 
-/** The two scores' sum; null when the scoring was refused or is incomplete. */
-function scoreSum(scores: AnalysisRun["scores"]): number | null {
-  return scores && !scores.refused && scores.values.length === SCORE_CALLS ? scores.values.reduce((total, v) => total + v, 0) : null;
+/** The scores' mean; null when the scoring was refused or gave no score. */
+function scoreMean(scores: AnalysisRun["scores"]): number | null {
+  return scores && !scores.refused && scores.values.length ? scores.values.reduce((total, v) => total + v, 0) / scores.values.length : null;
 }
 
-/** The score shown: the two scores' mean, floored (it never decides a half point on its own). */
+/** The score shown: the scores' mean, floored (it never decides a half point on its own). */
 export function shownScore(scores: AnalysisRun["scores"]): number | null {
-  const sum = scoreSum(scores);
-  return sum === null ? null : Math.floor(sum / SCORE_CALLS);
+  const mean = scoreMean(scores);
+  return mean === null ? null : Math.floor(mean);
 }
 
 /**
- * The selection rule on the scores: they add up to twice the source's threshold (or `threshold`,
- * when an evaluation sweeps it). The item must also pass relevance (normalizeAnalysis).
+ * The selection rule on the scores: their mean reaches the source's threshold (or `threshold`, when
+ * an evaluation sweeps it). The item must also pass relevance (normalizeAnalysis).
  */
 export function scoresSelect(scores: AnalysisRun["scores"], threshold = scores?.threshold ?? null): boolean {
-  const sum = scoreSum(scores);
-  return sum !== null && threshold !== null && sum >= threshold * SCORE_CALLS;
+  const mean = scoreMean(scores);
+  return mean !== null && threshold !== null && mean >= threshold;
+}
+
+/**
+ * The scores production would have decided with at `threshold`, from scores an evaluation asked in
+ * full: only the first, when it lies far from every line a score decides.
+ */
+export function decidingScores(scores: AnalysisRun["scores"], threshold: number): AnalysisRun["scores"] {
+  if (!scores || scores.refused || scores.values.length < 2 || needsSecondScore(scores.values[0]!, threshold)) return scores;
+  return { ...scores, values: scores.values.slice(0, 1), axes: scores.axes.slice(0, 1), receiptIds: scores.receiptIds.slice(0, 1) };
 }
 
 /** Runs the steps on the material as it is (or reuses their receipts) without writing business results. */
 export async function runAnalysis(a: AnalyzeInputArticle, opts: StepOpts = {}): Promise<AnalysisRun> {
   checkAnalysisRunning();
   // Missing article text waits for a later revision, before any paid step; displayable original posts keep their judgement.
-  if (awaitsMaterial(a)) return { prefilter: null, scores: null, writing: null, structure: null };
+  if (awaitsMaterial(a)) return { prefilter: null, scores: null, writing: null, structure: null, grounding: null };
   const prefilter = await runSelectionPrefilter(a, opts);
-  if (prefilter.label === "BLOCK") return { prefilter, scores: null, writing: null, structure: null };
+  if (prefilter.label === "BLOCK") return { prefilter, scores: null, writing: null, structure: null, grounding: null };
   const original = originalPostCopy(a.xPost, a.url);
   // The structure step needs nothing from the scores: it runs beside them.
   const structure = runStructure(a, opts).then((value) => ({ value }), (error: unknown) => ({ error }));
   try {
     const scores = await runSelectionScores(a, opts);
-    const sum = scoreSum(scores);
-    const near = scoresSelect(scores) || (sum !== null && sum > UNDERSTAND_FLOOR * SCORE_CALLS);
+    const mean = scoreMean(scores);
+    const near = scoresSelect(scores) || (mean !== null && mean > UNDERSTAND_FLOOR);
     const s = await structure;
     if ("error" in s) throw s.error;
     // Writing checks the material itself and is never handed the structure's fact: given those
@@ -497,7 +610,7 @@ export async function runAnalysis(a: AnalyzeInputArticle, opts: StepOpts = {}): 
     const writing: NonNullable<AnalysisRun["writing"]> = original
       ? { kind: "verbatim", model: null, titleZh: original.title, summaryZh: original.summary ?? "", reasonZh: null, receiptIds: [], reused: true }
       : await mendWording(a, (near ? await runUnderstand(a, opts) : null) ?? (await runSummarize(a, opts)), opts);
-    return { prefilter, scores, writing, structure: s.value };
+    return { prefilter, scores, writing, structure: s.value, grounding: await verifyCopy(a, writing, opts) };
   } finally {
     // A score/writing error or deploy must not let the job finish while a paid structure request
     // still owns a response. It settles and stores its receipt before shutdown can close the DB.
@@ -513,6 +626,7 @@ export function normalizeAnalysis(run: AnalysisRun) {
   // Original posts can consist entirely of media. Model-written copy still needs a title and summary.
   const relevance = label === "BLOCK" ? "block" : !run.writing || !titleZh || (!summaryZh && run.writing.kind !== "verbatim") ? "unknown" : "pass";
   const values = run.scores && !run.scores.refused ? run.scores.values : null;
+  const scoreAxes = run.scores && !run.scores.refused ? run.scores.axes : null;
   const score = shownScore(run.scores);
   const threshold = run.scores?.threshold ?? null;
   const selected = relevance === "pass" && scoresSelect(run.scores);
@@ -527,6 +641,7 @@ export function normalizeAnalysis(run: AnalysisRun) {
     selected,
     score,
     scores: values,
+    scoreAxes,
     scoreModel: run.scores?.model ?? null,
     scoreRefused: run.scores?.refused ?? false,
     threshold,
@@ -538,6 +653,8 @@ export function normalizeAnalysis(run: AnalysisRun) {
     reasonZh: run.writing?.reasonZh ?? null,
     scope: run.structure?.scope ?? "unknown",
     fact: run.structure?.fact ?? null,
+    subjectGuard: subjectGuard(run.structure?.fact?.subject, titleZh),
+    unmatchedSubjects: run.structure?.unmatchedSubjects ?? [],
   };
 }
 
@@ -562,18 +679,23 @@ export async function analyzeArticle(articleId: string, opts: StepOpts = {}): Pr
   if (waitsForPage(input)) return { analysisId: null, stale: false, needsBody: true, output: null, receiptIds: [], reused: true };
   const run = await runAnalysis(input, opts);
   const out = normalizeAnalysis(run);
+  // A failed check left its receipt failed, to be asked again: it is not completed with the judgement.
+  const checked = run.grounding && "receiptId" in run.grounding ? run.grounding : null;
   const receiptIds = [
     ...(run.prefilter ? [run.prefilter.receiptId] : []), ...(run.scores?.receiptIds ?? []), ...(run.writing?.receiptIds ?? []),
-    ...(run.structure ? [run.structure.receiptId] : []),
+    ...(run.structure ? [run.structure.receiptId] : []), ...(checked ? [checked.receiptId] : []),
   ];
   const w = run.writing;
   const detail = {
     prefilter: run.prefilter && { label: run.prefilter.label, reason: run.prefilter.reason },
-    scores: out.scores, scoreModel: out.scoreModel, threshold: out.threshold, ...(out.scoreRefused ? { scoreRefused: true } : {}),
+    scores: out.scores, scoreAxes: out.scoreAxes, scoreModel: out.scoreModel, threshold: out.threshold, ...(out.scoreRefused ? { scoreRefused: true } : {}),
     ...(w ? { writer: w.kind, writerModel: w.model, itemType: w.itemType ?? null, authorRole: w.authorRole ?? null } : {}),
     ...(w?.identityGuard?.outcome === "fallback" ? { identityGuard: w.identityGuard } : {}),
-    scope: out.scope, fact: out.fact,
+    scope: out.scope, fact: out.fact, subjectGuard: out.subjectGuard, ...(out.unmatchedSubjects.length ? { unmatchedSubjects: out.unmatchedSubjects } : {}),
+    ...(run.grounding ? { grounding: checked ? { model: checked.model, claims: checked.claims } : run.grounding } : {}),
   };
+  // A later reprint from another source is told by this fingerprint (editorial/copies.ts).
+  const simhash = fingerprint(copyText(input));
   const committed = await sql.begin(async (tx) => {
     const [current] = await tx<{ revision: number }[]>`SELECT revision FROM articles WHERE id = ${articleId} FOR UPDATE`;
     const stale = !current || current.revision !== input.revision;
@@ -586,10 +708,10 @@ export async function analyzeArticle(articleId: string, opts: StepOpts = {}): Pr
       RETURNING id`;
     for (const id of receiptIds) await completeReceipt(tx, id);
     if (!stale) {
-      await tx`UPDATE articles SET processing_state = ${out.relevance === "block" ? "blocked" : "analyzed"}, processing_error = NULL WHERE id = ${articleId}`;
+      await tx`UPDATE articles SET processing_state = ${out.relevance === "block" ? "blocked" : "analyzed"}, processing_error = NULL, simhash = ${simhash} WHERE id = ${articleId}`;
     }
     return { analysisId: row!.id, stale };
   });
-  const reused = (run.prefilter?.reused ?? true) && (run.scores?.reused ?? true) && (w?.reused ?? true) && (run.structure?.reused ?? true);
+  const reused = (run.prefilter?.reused ?? true) && (run.scores?.reused ?? true) && (w?.reused ?? true) && (run.structure?.reused ?? true) && (checked?.reused ?? true);
   return { analysisId: committed.analysisId, stale: committed.stale, output: out, receiptIds, reused };
 }

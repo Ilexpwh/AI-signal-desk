@@ -430,6 +430,27 @@ test("the weekly report names sources paused or partly excluded this week, with 
   assert.doesNotMatch(text, new RegExp(`· ${earlier}`), "a source paused before this week is not listed as paused this week");
 });
 
+// Evidence for tiers, not a ranking to act on by itself: the few sources most often first with something
+// others reported too, each with what it brought in and how much of it was selected.
+test("the weekly report names the few sources most often first to report, with their items and selected rate", async () => {
+  const fast = await source("first-fast");
+  const slow = await source("first-slow");
+  const [fact] = await sql`INSERT INTO facts (public_id, title) VALUES (${`${T}-fact`}, 'shared fact') RETURNING id`;
+  // Last week's reports: inside the 30 days, outside this week's spread of 精选 (the next test counts that).
+  for (const [sourceId, hours, selected] of [[fast, 8 * 24 + 6, true], [slow, 8 * 24 + 2, false]] as const) {
+    const id = `${sourceId}-report`;
+    const at = new Date(now - hours * 3600_000);
+    await sql`INSERT INTO articles(id,source_id,identity_key,url,title,published_at,discovered_at,timeline_at)
+      VALUES(${id},${sourceId},${id},${`https://example.test/${id}`},${id},${at},${at},${at})`;
+    await sql`INSERT INTO publications(article_id,source_id,title,url,channel,timeline_at,discovered_at,published_at,sort_at,fact_id,selected)
+      VALUES(${id},${sourceId},${id},${`https://example.test/${id}`},'news',${at},${at},${at},${at},${fact!.id},${selected})`;
+    await sql`INSERT INTO fact_articles(fact_id,article_id,role) VALUES(${fact!.id},${id},'report')`;
+  }
+  const text = await weekly();
+  assert.match(text, new RegExp(`最常首报的信源[^\\n]*\\n· ${fast}（T2）：首报 1/1，收录 1，精选率 100%`));
+  assert.doesNotMatch(text, new RegExp(`· ${slow}（`), "a source never first is not named");
+});
+
 test("sources only a module uses are counted and named on their own, apart from the news sources", async () => {
   const counts = async () => Number(/在用信源 (\d+) 个/.exec(await weekly())![1]);
   const before = await counts();
@@ -444,4 +465,47 @@ test("sources only a module uses are counted and named on their own, apart from 
   assert.equal(await counts(), before, "the news sources in use are counted without them");
   assert.match(text, /另有只给模块用的信源 2 个（盯梢 2），抓取失败 1 个/);
   assert.match(text, new RegExp(`· ${paused}（AI，[^，）]+，只给盯梢用）：账号设为私密`));
+});
+
+test("the weekly report shows how the week's 精选 and dailies spread over their sources", async () => {
+  const at = new Date(now - 86400_000);
+  const pick = async (sourceId: string, i: number) => {
+    const id = `${sourceId}-pick-${i}`;
+    await sql`INSERT INTO articles(id,source_id,identity_key,url,title,discovered_at,timeline_at)
+      VALUES(${id},${sourceId},${`url:${id}`},${`https://example.test/${id}`},${id},${at},${at})`;
+    await sql`INSERT INTO publications(article_id,source_id,title,eligible,selected,visibility,discovered_at,timeline_at,sort_at,url,channel)
+      VALUES(${id},${sourceId},${id},true,true,'public',${at},${at},${at},${`https://example.test/${id}`},'news')`;
+  };
+  const [a, b, c, d] = [await source("spread-a"), await source("spread-b"), await source("spread-c"), await source("spread-d")];
+  for (const [sourceId, picks] of [[a, 3], [b, 1], [c, 1], [d, 1]] as const) for (let i = 0; i < picks; i++) await pick(sourceId, i);
+  const entry = (sourceId: string) => ({ itemId: `${sourceId}-pick-0`, sourceId });
+  const content = { sections: [{ label: "行业", items: [entry(a), entry(a), entry(b)] }], flashes: [entry(c)] };
+  await sql`INSERT INTO reports(kind,key,window_start,window_end,content,generated_at)
+    VALUES('daily',${at.toISOString().slice(0, 10)},${new Date(+at - 86400_000)},${at},${sql.json(content)},${at})`;
+  const text = await weekly();
+  // Six picks, half of them from one source; four daily entries from three sources.
+  assert.match(text, /本周精选来自 4 个信源，前三个占 83%，均匀度 0\.90/);
+  assert.match(text, /本周 1 期日报的 4 条（含快讯）来自 3 个信源，前三个占 100%，均匀度 0\.95/);
+});
+
+test("the weekly report counts the week's checked copy whose title names another company than its fact, or that claims what the material does not", async () => {
+  const sourceId = await source("copy-checks");
+  const at = new Date(now - 86400_000);
+  const claim = (verdict: string) => ({ part: "summary", text: "一条说法", verdict, quote: null });
+  // Each item's judgements, oldest first: only the current one counts.
+  const items = {
+    mismatch: [{ subjectGuard: { outcome: "mismatch" }, grounding: { model: "m", claims: [claim("supported")] } }],
+    unsupported: [{ subjectGuard: { outcome: "match" }, grounding: { model: "m", claims: [claim("supported"), claim("unsupported")] } }],
+    rewritten: [{ subjectGuard: { outcome: "mismatch" }, grounding: { model: "m", claims: [claim("unsupported")] } }, { subjectGuard: { outcome: "match" }, grounding: { model: "m", claims: [claim("unclear")] } }],
+    failed: [{ subjectGuard: { outcome: "unknown" }, grounding: { failed: "outage" } }],
+    summarized: [{ subjectGuard: { outcome: "mismatch" } }],
+  };
+  for (const [name, outputs] of Object.entries(items)) {
+    const id = `${sourceId}-${name}`;
+    await sql`INSERT INTO articles(id,source_id,identity_key,url,title,discovered_at,timeline_at)
+      VALUES(${id},${sourceId},${`url:${id}`},${`https://example.test/${id}`},${id},${at},${at})`;
+    for (const output of outputs) await sql`INSERT INTO analyses(article_id,input_revision,origin,output) VALUES(${id},1,'model',${sql.json(output)})`;
+  }
+  assert.match(await weekly(), /本周入选和接近入选的 4 条稿子：标题主体和事实对不上 1 条，有原文不支持的说法 1 条，核对失败 1 条/,
+    "copy the cheaper prompts wrote is not checked, so not counted");
 });

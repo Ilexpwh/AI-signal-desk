@@ -7,8 +7,9 @@ import { actorOf } from "@aihot/backend/admin/auth";
 import { navCounts } from "@aihot/backend/admin/navigation";
 import { listAudit } from "@aihot/backend/audit";
 import { importSelectBenchRun, listSelectBenchRuns, selectBenchRun } from "@aihot/backend/admin/selectbench";
-import { modelsOverview, switchModel } from "@aihot/backend/admin/models";
+import { modelsOverview, setShadow, switchModel } from "@aihot/backend/admin/models";
 import { contentChain, overrideFields, rerun, searchContent, setSeoIndexed, setVisibility } from "@aihot/backend/admin/content";
+import { unmatchedSubjects } from "@aihot/backend/admin/subjects";
 import { detachFromFact, mergeStories } from "@aihot/backend/events/corrections";
 import { banFeedbackEmail, banSource, eraseFeedback, feedbackScreenshot, listFeedback, unbanSource, updateFeedback } from "@aihot/backend/admin/feedback";
 import { requeueFailedArticles, runsOverview } from "@aihot/backend/admin/runs";
@@ -52,6 +53,7 @@ export function registerAdmin(app: FastifyInstance) {
 
   // Content and events
   app.get("/api/admin/content", adminHandler(async (req) => ({ rows: await searchContent(q(req).q ?? "") })));
+  app.get("/api/admin/unmatched-subjects", adminHandler(async () => unmatchedSubjects()));
   app.get("/api/admin/content/:id", adminHandler(async (req, reply) => orNotFound(req, reply, await contentChain(param(req, "id")))));
   app.post("/api/admin/content/:id/visibility", adminHandler(async (req, _reply, admin) => setVisibility(param(req, "id"), body(req) as never, actorOf(admin))));
   app.post("/api/admin/content/:id/seo", adminHandler(async (req, reply, admin) => orNotFound(req, reply, await setSeoIndexed(param(req, "id"), body(req) as never, actorOf(admin)))));
@@ -116,6 +118,10 @@ export function registerAdmin(app: FastifyInstance) {
   app.post("/api/admin/models/:capability", adminHandler(async (req, _reply, admin) => {
     const b = body<{ model: string | null; reason: string }>(req);
     return switchModel(param(req, "capability"), b.model ?? null, String(b.reason ?? ""), actorOf(admin));
+  }));
+  app.post("/api/admin/model-shadow/:capability", adminHandler(async (req, _reply, admin) => {
+    const b = body<{ model: string | null; reason: string }>(req);
+    return setShadow(param(req, "capability"), b.model ?? null, String(b.reason ?? ""), actorOf(admin));
   }));
 
   // SelectBench

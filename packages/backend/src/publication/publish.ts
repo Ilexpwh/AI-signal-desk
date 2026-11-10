@@ -38,6 +38,8 @@ interface ArticleRow {
 
 interface AnalysisRow {
   id: number;
+  /** The judgement was taken from an original (editorial/copies.ts). */
+  copy: boolean;
   relevance: string | null;
   category: string | null;
   tags: string[];
@@ -61,6 +63,7 @@ interface PublicationRow {
   revision: number;
   visibility: string;
   eligible: boolean;
+  copy_coverage: boolean;
   selected: boolean;
   selection_candidate: boolean;
   title: string;
@@ -102,6 +105,8 @@ export interface V1ItemPayload {
   selected: boolean;
   reason: string | null;
   attribution: { name: string; url: string };
+  /** The category's IPTC media topic, when the site maps one: added as v1 reads it (v1.ts withIptc), never stored in the ledger. */
+  iptc?: { code: string; label: string };
 }
 
 export interface PublishOptions {
@@ -252,7 +257,7 @@ export async function publishArticleTx(tx: Tx, articleId: string, options: Publi
     SELECT id, name, kind, tier, participation_mode, first_party, site_fulltext, syndicate_fulltext FROM sources WHERE id = ${article.source_id}`;
   if (!source) return null;
   const [analysis] = await tx<AnalysisRow[]>`
-    SELECT id, relevance, category, tags, subjects, title_zh, summary_zh, reason_zh, score, selected
+    SELECT id, output->>'copyOf' IS NOT NULL AS copy, relevance, category, tags, subjects, title_zh, summary_zh, reason_zh, score, selected
     FROM analyses WHERE article_id = ${articleId} ORDER BY input_revision DESC, id DESC LIMIT 1`;
   const [override] = await tx<OverrideRow[]>`SELECT fields, visibility FROM editorial_overrides WHERE article_id = ${articleId}`;
   const [membership] = await tx<{ fact_id: number; story_id: number | null }[]>`
@@ -288,8 +293,13 @@ export async function publishArticleTx(tx: Tx, articleId: string, options: Publi
 
   // An undated archive has a readable detail page, but its discovery is not a news timestamp.
   // Explicit imports can retain an editorial decision already published elsewhere.
-  const eligible = isPoolEligible({ participationMode: source.participation_mode, relevance, title, summary, originalPost: !!original })
+  const listable = isPoolEligible({ participationMode: source.participation_mode, relevance, title, summary, originalPost: !!original })
     && (!article.backfill || article.published_at !== null || !!options.releasedAt);
+  // A copy (editorial/copies.ts) is listed nowhere: its original stands for both. What would list it
+  // otherwise counts it as coverage of its fact. An editor who selects a copy takes it out of the shadow.
+  const copy = analysis?.copy === true && f.selected !== true;
+  const eligible = listable && !copy;
+  const copyCoverage = listable && copy;
   const selectionCandidate = isSelectable(eligible, judgedSelected, source.tier);
   // Scoring nominates a report; a completed identity/value decision admits it to selection.
   // Nothing releases a candidate without one: a timeout, a missing or invalid answer is no evidence the
@@ -330,7 +340,7 @@ export async function publishArticleTx(tx: Tx, articleId: string, options: Publi
 
   const next = {
     source_id: source.id, first_party: source.tier === "T1",
-    visibility, eligible, selected, selection_candidate: selectionCandidate, title: title ?? collapseWhitespace(article.title), original_title: originalTitle, summary, reason,
+    visibility, eligible, copy_coverage: copyCoverage, selected, selection_candidate: selectionCandidate, title: title ?? collapseWhitespace(article.title), original_title: originalTitle, summary, reason,
     category, tags, score: round1(score), body_mode: bodyMode, story_id: membership?.story_id ?? null, fact_id: membership?.fact_id ?? null,
     indexable, url: article.url, channel, syndicate, published_at: article.published_at, discovered_at: article.discovered_at,
     timeline_at: article.timeline_at, backfill: article.backfill, sort_at: sortAt, visible_after: visibleAfter,
@@ -359,16 +369,16 @@ export async function publishArticleTx(tx: Tx, articleId: string, options: Publi
   const revision = previous ? previous.revision + (changed ? 1 : 0) : 1;
 
   await tx`
-    INSERT INTO publications (article_id, analysis_id, revision, visibility, eligible, selected, selection_candidate, title, original_title, summary,
+    INSERT INTO publications (article_id, analysis_id, revision, visibility, eligible, copy_coverage, selected, selection_candidate, title, original_title, summary,
       reason, category, tags, score, source_id, channel, first_party, url, published_at, discovered_at, timeline_at, backfill,
       selected_ready_at, visible_after, body_mode, syndicate, indexable, story_id, fact_id, search_text, sort_at, updated_at)
-    VALUES (${articleId}, ${analysis?.id ?? null}, ${revision}, ${visibility}, ${eligible}, ${selected}, ${selectionCandidate}, ${next.title},
+    VALUES (${articleId}, ${analysis?.id ?? null}, ${revision}, ${visibility}, ${eligible}, ${copyCoverage}, ${selected}, ${selectionCandidate}, ${next.title},
       ${originalTitle}, ${summary}, ${reason}, ${category}, ${tags}, ${next.score}, ${source.id}, ${channel}, ${source.tier === "T1"},
       ${article.url}, ${article.published_at}, ${article.discovered_at}, ${article.timeline_at}, ${article.backfill},
       ${selectedReadyAt}, ${visibleAfter}, ${bodyMode}, ${syndicate}, ${indexable}, ${next.story_id}, ${next.fact_id}, ${searchText}, ${sortAt}, now())
     ON CONFLICT (article_id) DO UPDATE SET
       analysis_id = EXCLUDED.analysis_id, revision = EXCLUDED.revision, visibility = EXCLUDED.visibility,
-      eligible = EXCLUDED.eligible, selected = EXCLUDED.selected, selection_candidate = EXCLUDED.selection_candidate, title = EXCLUDED.title, original_title = EXCLUDED.original_title,
+      eligible = EXCLUDED.eligible, copy_coverage = EXCLUDED.copy_coverage, selected = EXCLUDED.selected, selection_candidate = EXCLUDED.selection_candidate, title = EXCLUDED.title, original_title = EXCLUDED.original_title,
       summary = EXCLUDED.summary, reason = EXCLUDED.reason, category = EXCLUDED.category, tags = EXCLUDED.tags,
       score = EXCLUDED.score, source_id = EXCLUDED.source_id, channel = EXCLUDED.channel, first_party = EXCLUDED.first_party,
       url = EXCLUDED.url, published_at = EXCLUDED.published_at, discovered_at = EXCLUDED.discovered_at,
@@ -376,7 +386,7 @@ export async function publishArticleTx(tx: Tx, articleId: string, options: Publi
       visible_after = EXCLUDED.visible_after, body_mode = EXCLUDED.body_mode, syndicate = EXCLUDED.syndicate,
       indexable = EXCLUDED.indexable, story_id = EXCLUDED.story_id, fact_id = EXCLUDED.fact_id,
       search_text = EXCLUDED.search_text, sort_at = EXCLUDED.sort_at, updated_at = now()
-    WHERE (publications.analysis_id, publications.revision, publications.visibility, publications.eligible,
+    WHERE (publications.analysis_id, publications.revision, publications.visibility, publications.eligible, publications.copy_coverage,
         publications.selected, publications.selection_candidate, publications.title, publications.original_title, publications.summary,
         publications.reason, publications.category, publications.tags, publications.score,
         publications.source_id, publications.channel, publications.first_party, publications.url,
@@ -384,7 +394,7 @@ export async function publishArticleTx(tx: Tx, articleId: string, options: Publi
         publications.selected_ready_at, publications.visible_after, publications.body_mode, publications.syndicate,
         publications.indexable, publications.story_id, publications.fact_id, publications.search_text,
         publications.sort_at)
-      IS DISTINCT FROM (EXCLUDED.analysis_id, EXCLUDED.revision, EXCLUDED.visibility, EXCLUDED.eligible,
+      IS DISTINCT FROM (EXCLUDED.analysis_id, EXCLUDED.revision, EXCLUDED.visibility, EXCLUDED.eligible, EXCLUDED.copy_coverage,
         EXCLUDED.selected, EXCLUDED.selection_candidate, EXCLUDED.title, EXCLUDED.original_title, EXCLUDED.summary,
         EXCLUDED.reason, EXCLUDED.category, EXCLUDED.tags, EXCLUDED.score,
         EXCLUDED.source_id, EXCLUDED.channel, EXCLUDED.first_party, EXCLUDED.url,

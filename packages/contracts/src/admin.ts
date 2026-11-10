@@ -117,7 +117,14 @@ export interface AdminSourceRow {
   first_party: boolean;
   next_fetch_at: Timestamp | null;
   items_7d: number;
+  /** The last 30 days (sources/stats.ts), evidence for the tier the owner sets; nothing changes a tier from them. */
+  items_30d: number;
+  /** Selected and not withdrawn. */
   selected_30d: number;
+  /** Facts it reported that another source reported too. */
+  shared_30d: number;
+  /** Of those, the facts its report was the first of. */
+  first_30d: number;
 }
 
 export interface AdminSources {
@@ -203,6 +210,24 @@ export interface AdminContentSearch {
   rows: AdminContentRow[];
 }
 
+/** A fact subject the vocabulary does not know (industry/taxonomy.ts ENTITIES), as the structure step wrote it. */
+export interface AdminUnmatchedSubject {
+  name: string;
+  /** Articles discovered in the window whose latest analysis named it. */
+  count: number;
+  last_seen_at: Timestamp;
+  latest_article_id: string;
+  /** The identity lexicon's companies (IDENTITY_LEXICON) it reads in the name: often a company that lacks this alias. */
+  lexicon: string[];
+}
+
+/** 未收录主体: the names named in at least `min` articles over the last `days`, most often first. */
+export interface AdminUnmatchedSubjects {
+  days: number;
+  min: number;
+  rows: AdminUnmatchedSubject[];
+}
+
 /** The publications row of an item, as the publish step wrote it. */
 export interface AdminPublication {
   article_id: string;
@@ -247,6 +272,8 @@ export interface AdminContentChain {
     published_at: Timestamp | null; published_at_claim: string | null; discovered_at: Timestamp; timeline_at: Timestamp; backfill: boolean;
     body_status: string; revision: number; processing_state: string; processing_error: string | null; grouped_at: Timestamp | null; body_chars: number | null;
     source_name: string; source_kind: string; tier: string; participation_mode: string; site_fulltext: boolean; syndicate_fulltext: boolean;
+    /** The original whose judgement its latest analysis took (a reprint), and how many fingerprint bits they differ in. */
+    copy_of: string | null; copy_distance: number | null;
   };
   discoveries: Array<{ source_id: string; via: string; discovered_at: Timestamp }>;
   revisions: Array<{ revision: number; title: string; content_hash: string | null; created_at: Timestamp }>;
@@ -254,6 +281,12 @@ export interface AdminContentChain {
     id: number; origin: string; model: string | null; prompt_version: string | null; input_revision: number; relevance: string | null; category: string | null;
     score: number | null; selected: boolean | null; title_zh: string | null; reason_zh: string | null; created_at: Timestamp;
     receipts: Array<{ id: number; status: string; service: string; model: string | null; cost: number | null; at: Timestamp }>;
+    /** The copy checks, only recorded: whether the title names the fact's company, and (copy by the content understanding) its claims against the material. */
+    subject_guard: { outcome: "match" | "mismatch" | "unknown"; factEntity: string | null; titleEntities: string[] } | null;
+    grounding:
+      | { model: string; claims: Array<{ part: "title" | "summary"; text: string; verdict: "supported" | "unsupported" | "unclear"; quote: string | null }> }
+      | { failed: string }
+      | null;
   }>;
   publication: AdminPublication | null;
   override: { fields: Record<string, unknown>; visibility: string | null; reason: string | null; version: number; updated_by: string; updated_at: Timestamp } | null;
@@ -262,6 +295,8 @@ export interface AdminContentChain {
   decisions: Array<{ verdict: string; fact_id: number | null; story_id: number | null; receipt_id: number | null; candidates: unknown; created_at: Timestamp }>;
   deliveries: Array<{ target_key: string; dedupe_key: string; status: string; attempts: number; response: string | null; created_at: Timestamp; sent_at: Timestamp | null }>;
   history: AdminAuditEntry[];
+  /** The reprints that took this item's judgement, first discovered first. */
+  copies: Array<{ id: string; title: string; source_name: string; distance: number; discovered_at: Timestamp }>;
 }
 
 // Feedback
@@ -396,15 +431,31 @@ export interface AdminModelUsage {
   p95: number | null;
   tokensIn: number;
   tokensOut: number;
+  /** What the provider billed, as it reported. */
   actualCost: number | null;
+  /** What the provider client worked out from the billed units (pages, tokens, objects). */
+  estimatedCost: number | null;
   currency: string | null;
+  /** Calls without a cost of their own, at the operator's unit prices (`service_prices`). */
   estimate: { amount: number; currency: string } | null;
+  /** Answered calls that neither carry a cost nor have a unit price. */
+  unpriced: number;
 }
 
 export interface AdminModels {
   days: number;
-  capabilities: Array<{ key: string; label: string; env: string; defaultModel: string; vision: boolean; current: { model: string; source: "admin" | "env" | "default"; invalid?: string }; fallback: { model: string; primaryPaused: boolean; backupPaused: boolean; nextProbeAt: string | null } | null; usage: AdminModelUsage[] }>;
-  choices: Array<{ key: string; service: string; vision: boolean }>;
+  capabilities: Array<{
+    key: string; label: string; env: string; defaultModel: string; vision: boolean; current: { model: string; source: "admin" | "env" | "default"; invalid?: string };
+    fallback: { model: string; primaryPaused: boolean; backupPaused: boolean; nextProbeAt: string | null } | null; usage: AdminModelUsage[];
+    /** Whether a decision model can answer beside this step (shadow), and the one that does now. */
+    decisions: boolean; shadow: string | null;
+  }>;
+  /** Paid requests outside the model steps: embeddings, page reading, X and WeChat lookups. */
+  others: Array<Omit<AdminModelUsage, "promptVersion"> & { service: string }>;
+  /** Every paid request of the window, per currency; `estimated` is the part not billed as such. */
+  totals: { costs: Array<{ currency: string; actual: number; estimated: number }>; unpriced: number };
+  /** `decision`: a decision service (Jev), which only runs in shadow. */
+  choices: Array<{ key: string; service: string; vision: boolean; decision: boolean }>;
   history: Array<{ at: Timestamp; actor: string; subject: string; reason: string | null; before: { model: string; source: string } | null; after: { model: string; source: string } | null }>;
   benches: Array<{ id: string; label: string; sample_size: number; prompt_version: string | null; models: string[]; created_at: Timestamp }>;
 }

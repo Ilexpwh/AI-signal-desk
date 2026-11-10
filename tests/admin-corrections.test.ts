@@ -1,11 +1,11 @@
-import { createHmac } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { config } from "@aihot/backend/config";
 import { tag } from "./setup.ts";
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { sql, closeDb } from "@aihot/backend/db";
 import { createSource, updateSource } from "@aihot/backend/admin/sources";
-import { overrideFields, rerun, setSeoIndexed, setVisibility } from "@aihot/backend/admin/content";
+import { contentChain, overrideFields, rerun, setSeoIndexed, setVisibility } from "@aihot/backend/admin/content";
 import { upsertMaterial } from "@aihot/backend/content/materials";
 import { publishArticle } from "@aihot/backend/publication/publish";
 import { getBoss, stopBoss } from "@aihot/backend/jobs/queue";
@@ -111,6 +111,61 @@ test("repeating a completed command returns its job without resetting newer proc
     assert.equal(state!.processing_state, "analyzed");
     assert.equal((await sql`SELECT 1 FROM grouping_overrides WHERE article_id = ${id}`).length, 1);
     assert.equal((await sql`SELECT 1 FROM audit_log WHERE request_id = ${key}`).length, 1);
+  }
+});
+
+const reprints = `admin-reprints-${T}`;
+await sql`INSERT INTO sources (id, name, kind, tier) VALUES (${reprints}, 'Admin reprints', 'rss', 'T2')`;
+
+/** An original and another source's copy of it, grouped together as the copy gate and joinOriginal leave them. */
+async function copied() {
+  const original = await article();
+  const { articleId: copy } = await upsertMaterial({ sourceId: reprints, url: `https://example.org/${tag()}`, title: "审查材料", bodyText: "正文", bodyStatus: "ok", via: "fetch", publishedAt: new Date() });
+  await sql`INSERT INTO analyses (article_id, input_revision, origin, relevance, summary_zh, selected, output)
+            VALUES (${original}, 1, 'rule', 'pass', '原文摘要', false, '{}'), (${copy}, 1, 'rule', 'pass', '原文摘要', false, ${sql.json({ copyOf: original, distance: 2 })})`;
+  await sql`UPDATE articles SET simhash = 0, processing_state = 'analyzed', processing_queued_at = NULL, grouping_status = 'complete', selection_adds_value = false WHERE id = ${copy}`;
+  const [story] = await sql`INSERT INTO stories (public_id, title) VALUES (${randomUUID()}, '转载') RETURNING id`;
+  const [fact] = await sql`INSERT INTO facts (public_id, story_id, title) VALUES (${randomUUID()}, ${story!.id}, '转载') RETURNING id`;
+  await sql`INSERT INTO fact_articles (fact_id, article_id, role) VALUES (${fact!.id}, ${original}, 'primary'), (${fact!.id}, ${copy}, 'report')`;
+  await sql`INSERT INTO story_signals (story_id, article_id, participant_key, source_id, kind, observed_at)
+            VALUES (${story!.id}, ${copy}, ${`source:${reprints}`}, ${reprints}, 'editorial', now())`;
+  for (const id of [original, copy]) await publishArticle(id);
+  return { original, copy };
+}
+
+/** The copy has left its original's place and waits for a judgement of its own. */
+async function released(copy: string, original: string) {
+  assert.equal((await sql`SELECT 1 FROM fact_articles WHERE article_id = ${copy}`).length, 0, "its original's place is not its own judgement");
+  assert.equal((await sql`SELECT 1 FROM story_signals WHERE article_id = ${copy}`).length, 0);
+  const [state] = await sql`SELECT grouping_status, selection_adds_value, processing_state, processing_queued_at IS NOT NULL AS queued FROM articles WHERE id = ${copy}`;
+  assert.deepEqual({ ...state }, { grouping_status: "pending", selection_adds_value: null, processing_state: "new", queued: true });
+  const [p] = await sql`SELECT fact_id FROM publications WHERE article_id = ${copy}`;
+  assert.equal(p!.fact_id, null);
+  assert.equal((await sql`SELECT 1 FROM fact_articles WHERE article_id = ${original}`).length, 1, "the original keeps its place");
+}
+
+test("re-evaluating a copy judges it in full and groups it afresh; the chain links copy and original", async () => {
+  const { original, copy } = await copied();
+  const chain = (await contentChain(copy))!;
+  assert.deepEqual([chain.article.copy_of, chain.article.copy_distance], [original, 2]);
+  assert.deepEqual((await contentChain(original))!.copies.map((c) => [c.id, c.distance]), [[copy, 2]]);
+
+  await getBoss();
+  assert.ok((await rerun(copy, "analyze", `request-copy-${T}`, "test"))?.jobId);
+  await released(copy, original);
+});
+
+// A copy took the original's judgement as it stood: once an editor withdraws or corrects the original,
+// that judgement is no longer the site's, and the copy is judged again on its own.
+test("withdrawing or correcting an original sends its copies back to be judged on their own", async () => {
+  await getBoss();
+  for (const moderate of [
+    (id: string) => setVisibility(id, { visibility: "withdrawn", version: 0, reason: "撤回原文" }, "test"),
+    (id: string) => overrideFields(id, { fields: { title: "更正后的原文标题" }, version: 0, reason: "更正原文" }, "test"),
+  ]) {
+    const { original, copy } = await copied();
+    await moderate(original);
+    await released(copy, original);
   }
 });
 

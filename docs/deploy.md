@@ -60,7 +60,87 @@ MCP 默认接受 `SITE_URL` 的主机以及 `localhost`、`127.0.0.1`、`[::1]`�
 
 前面有 Nginx、CDN 这类缓存时，要遵循应用返回的缓存期限（`Cache-Control`）：公开网页、导航数据、API、RSS、条目 Markdown、报告分享图、站点地图，以及接入说明 `/api/v1/agent` 和 `/openapi-v1.json`（五分钟到期后也要重新验证），都不要另加更长的缓存期，不要在到期后离线返回旧内容，也不要在转发旧响应时重新起算它的寿命；不要让代理和 CDN 叠加缓存动态内容。框架不代管自建站的 CDN，也不替它清缓存。
 
+### 用自己的浏览器渲染正文
+
+订阅里没有全文的文章，worker 去抓原文页读正文，按这个顺序：
+
+1. 直接抓原文页，用 Readability 读。
+2. Readability 读不出文章（不到 200 字，或者解析出错）时，用 Defuddle 再读同一份网页，它还能读出只写在页面结构化数据（schema.org 的 `articleBody`）或声明式 Shadow DOM 里的正文。它只读这一页，不向别的网站发请求，找不到文章时也不把整页当正文。
+3. 原文页抓不到（比如要先过人机验证），或者前两步都读不出时，配了 `RENDER_URL` 的交给自己跑的 Crawl4AI 渲染，再按前两步读渲染出来的网页。不收费。
+4. 还读不出才用 Jina Reader，按次计费，有预算上限。
+
+Crawl4AI 自己去抓网页，不经过抓取器的内网地址检查。交给它之前，网址按抓取器的规则检查一遍，内网地址不交；渲染完停在的地址也检查一遍，是内网地址就不用这次的结果。但跳转和页面脚本发出的请求都是它自己发的，这两道检查管不到，所以它必须跑在连不到内部服务的网络里：
+
+- `docker-compose.yml` 里的 `render` 单独在 `render` 网络上，这个网络上只有它和 worker，不映射端口，连不到数据库、API 和网页容器。
+- 这还不够：容器默认还能连到宿主机本身、同一内网的其他机器和云厂商的元数据地址（`169.254.169.254`、`100.100.100.200`）。要在宿主机防火墙里拒绝 `render` 网络访问这些地址；做不到的，把 Crawl4AI 放到一台单独的、内网里没有别的服务的机器上，`RENDER_URL` 写那台机器经 HTTPS 的地址。
+- 服务器在中国大陆、靠 `EGRESS_PROXY_URL` 抓海外网站时，Crawl4AI 不走这个代理，海外页面多半渲染不出来，仍会交给 Jina。
+
+启用时在 `.env` 里加上这几行（令牌用 `openssl rand -hex 32` 生成）：
+
+```bash
+RENDER_URL=http://render:11235
+RENDER_TOKEN=<令牌>
+COMPOSE_PROFILES=render
+```
+
+再 `docker compose up -d`。有了 `COMPOSE_PROFILES`，以后每次 `docker compose up` 都会带上 `render`，不用写 `--profile render`。它跑一个 Chromium，至少留 1 GB 内存。
+
+`RENDER_TOKEN` 一定要设：没有令牌时 worker 不调用渲染服务（日志里记一次 `render service not used`），Crawl4AI 也只在自己的容器里监听；有了令牌，被渲染的网页自己也驱动不了这个服务。渲染出来超过 8 MB 的网页不用，和直接抓取的上限一样。渲染服务连不上、超时、拒绝令牌或者回答看不懂时，worker 日志里记一条 `render service failed`；某一页渲染不出来（人机验证、下载文件，Crawl4AI 回答 500 或 504）不记。两种情况正文都照常交给 Jina。镜像版本固定写在 `docker-compose.yml` 里，升级前先看 Crawl4AI 的更新说明。
+
 ### 更新
+
+**事件综述逐句标出处（AI-signal-desk）**：迁移 `0131` 给 `story_digests` 加一列 `citations`（可以为空），照下面的命令更新时 setup 会跑它，不改已有的数据。没有新环境变量。综述的每一句都列出它依据的报道，事件页在句末用小号数字链到这些报道；句中的数字、日期、英文名称和公司名在所引报道里找不到的句子不发布；拿掉了句子、剩下不足 100 字时保留上一版综述，没有上一版就不显示综述（没拿掉句子的综述多短都照常发布），见 [事件综述](grouping.md#事件综述)。要注意：
+
+- **已有的综述没有出处**，照常显示、不带数字标记，事件的综述重写后才有。不批量重写；想让某几个事件立即重写，见 [综述评测](story-digest-evaluation.md#4-改完提示词之后)。
+- **综述换了重写时机**：只在事件多了一个综述还没写到的事实、来了一篇一手报道（`T1` 或核实过的当事方账号），或者写综述所依据的报道被更正、撤下时重写；别家媒体重复已写到的事实不再重写，模型调用会比原来少。
+- **`industry/prompts/story-digest.md` 的输出变了**，从 `{"title", "digest"}` 改成逐句的 `{"title", "sentences": [{"text", "reports", "newParagraph"}]}`。自己改过这份提示词的，合并时把输出换成新的写法（见示范提示词末尾）；还在输出 `digest` 的提示词会让每次写综述都因格式不对而失败。
+- 网站接口 `/api/site/stories/<id>` 多了 `digestSentences`（没有出处时是 `null`）。`digest` 仍是整段文字，公开接口 `/api/v1`、RSS、MCP 和 Agent Markdown 没有变化。
+- 上线前用 [综述评测](story-digest-evaluation.md) 在自己的事件上跑一遍，看有多少句因为出处对不上没发布、多少事件检查后不足 100 字。
+
+**未收录主体、Wikidata 和 IPTC（AI-signal-desk）**：没有数据库迁移，没有新环境变量，不调用模型，已存的数据不用改。说明见 [把它改成你的行业](customize.md#2-分类标签和主题industrytaxonomytsindustrytopicsjson)。要注意：
+
+- **未收录主体**：之后的判断把事实主体里对不上 `ENTITIES` 的名字记在 `output.unmatchedSubjects`；后台“内容诊断”页不输入搜索词时列出近 30 天出现 3 篇以上的。升级前判过的资料没有这项，列表要随新资料慢慢攒起来。
+- **`industry/taxonomy.ts` 多了两个选填字段**：`ENTITIES` 的 `wikidata`（`"Q…"`）和 `CATEGORIES` 的 `iptc`（`{ code, label }`）。示范包两项都没填，不填时网站、接口和 RSS 都和原来一样。自己改过这个文件的不用补。新脚本 `scripts/wikidata-entities.ts` 只打印候选，不改文件。
+- **文章页的结构化数据**多了 `about`（主体公司）和 `mentions`（摘要提到的其他公司），填了 `wikidata` 的带 `sameAs`。网站接口 `/api/site/items/<id>` 多了 `entities`。
+- **公开接口只加字段**：填了 `iptc` 的类别，`/api/v1/items`、精选快照和变更（默认字段）以及 MCP 的最新、搜索结果，每条多一个 `iptc`；RSS 每条多一个 domain 是 `http://cv.iptc.org/newscodes/mediatopic/` 的 `<category>`。`interfaceVersion` 不变，OpenAPI 已同步。
+
+**核对文字，先只记录（AI-signal-desk）**：没有数据库迁移。新增模型步骤“核对文字”（选填的 `VERIFY_MODEL` 可以单独选模型，不填用默认模型）和提示词 `industry/prompts/verify-copy.md`：内容理解写好标题和摘要（入选和接近入选的资料）以后，多一次模型调用，把它们拆成一条条说法逐条对照原文，结果记在判断记录的 `output.grounding`；标题里的公司和事实主体对不对得上由代码比，记在 `output.subjectGuard`。两项都只记录，读者看到的文字不变，核对失败也不影响判断。后台“内容诊断”的每次判断下面列出这两项，信源周报多一行本周的计数，怎么看见 [精选与校准](selection.md#6-核对文字先只记录)。要注意：
+
+- 入选和接近入选的资料每条多一次调用（用 `summarize-*.md` 写的其余资料不核对），用量在后台“模型与评测”的“核对文字”一行。
+- 判断记录的提示词版本（`analyses.prompt_version`）多了 `verify-copy@…` 一段；已有的判断不重算，也不补核对。
+- 自己维护行业包的，合并时把 `verify-copy.md` 带进来，没有它服务启动不了。
+
+**正文提取在 Jina 之前多了两道免费的读法（AI-signal-desk）**：Readability 读不出文章的页面，先用 Defuddle（新依赖 `defuddle` 0.19.6，MIT）再读一次；原文页抓不到或都读不出时，配了 `RENDER_URL` 的先交给自己跑的 Crawl4AI 渲染，最后才用 Jina，见 [用自己的浏览器渲染正文](#用自己的浏览器渲染正文)。没有数据库迁移；不设 `RENDER_URL` 就不会调用渲染服务。只作用于之后抽取的正文，已存的正文不变，升级不批量重新抽取。`docker-compose.yml` 多了一个 `render` 网络，worker 接在上面；不带 `--profile render` 启动时，这个网络上只有 worker。
+
+**主题的“上升中”（AI-signal-desk）**：迁移 `0130` 新建 `topic_trends` 表，照下面的命令更新时 setup 会跑它，不改已有的数据。worker 多了每天 00:20 的定时任务 `topics.trend`：按北京时间的日子数每个主题有多少个事件被 `editorial` 信源报道、占当天全部这类事件的比例，和它前 28 天的平均比，见 [把它改成你的行业](customize.md#2-分类标签和主题industrytaxonomytsindustrytopicsjson)。不调用模型，没有新环境变量。要注意：
+
+- 升级后第一次运行就算出最近 7 天（前 28 天的平均从已有的热度证据里现算，不用回填）；更早的日子没有记录，升级前出过的周报也没有“上升中的主题”这一版。
+- **`industry/taxonomy.ts` 多了 `TOPIC_RISING`**（默认 `{ minStories: 3, ratio: 3 }`，偏保守的起始值）。自己改过这个文件的，合并时补上，不补通不过类型检查。站点跑上几周后按上面链接里的查询看 `topic_trends`，再定门槛。
+- 主题页、主题目录和网站接口 `/api/site/topics`、`/api/site/topics/<slug>` 的主题多了 `rising`（不上升时是 `null`）；每一期周报（`/api/site/reports/weekly/<周>`）多了 `rising`。公开接口 `/api/v1`、RSS 和 MCP 没有变化。导航里隐藏了 `"/topics"` 的站，周报不显示这一版。
+
+**热度 v2（AI-signal-desk）**：没有数据库迁移，没有新环境变量，已存的数据不用改。热点榜存的算法版本（`hot_rankings.rule_version`）变成 `heat-v2-48h-halflife24h-alpha0`。要注意：
+
+- **涨跌换了比法**：和 6 小时前比的是这件事在全部热度里的占比，不再是它自己的热度。更新后热点榜上的上升、回落、持平和“发酵中”会和原来不同：大家一起安静下来时不会整榜显示回落；自己热度涨了、但别的事涨得更快的，会显示回落。排名和热度值不变。“爆”（6 小时内新来的参与方过半、且至少 3 个）比的是一件事自己内部的人数，没有改。
+- **同一平台的账号归成一组**：社区站的发帖人、X 账号、公众号按平台各成一组，组里第 k 个乘 1/(1+α(k−1))，说明见 [信源](sources.md#分级参与方式与全文)。`packages/backend/src/events/hot.ts` 的 `HEAT_BUCKET_ALPHA` 默认 `0`，每个都算满，排名和热度值都和原来一样。要改的话，先攒至少两周真实数据，再跑 `node --env-file=.env scripts/eval-heat.ts --days 30 --alphas 0,0.25,0.5,1`：它只读库，按每 6 小时回放一次，对比每个 α 和原来的算法，列出前 10 平均进出几个、排名相关系数（Spearman），以及最常被挤进、挤出的事件，报告写到 `.data/eval/`。看过这些事件该不该进榜再选 α；改了以后算法版本跟着变。热点页每条后面的 24 小时小走势图用的是每小时存下的值，改 α 之后的一天里新旧算法混在一起，一天后就都是新的；热点页“热度是怎么算的”里的说明也要补上这一条。
+- 信源周报多两行：这一周精选和日报的来源分布（来自多少个信源、最多的三个占几成、均匀度），见 [信源](sources.md#抓取频率)。不设告警线；要不要设、设多少，看过几周的数再定。
+
+**转载不再调用模型（AI-signal-desk）**：别的信源近两周判过的同一篇文章被转载过来，沿用原文的判断，不调用任何模型，归到原文所在的事件下（见 [事件归组](grouping.md#转载)）。有四个数据库迁移，照下面的命令更新时 setup 会跑它们：`0128` 给资料加一列文字指纹 `simhash`（可以为空），`0129` 在线建它的索引；`0133` 给公开记录加一列 `copy_coverage`（默认 `false`），`0134` 在线建按原文找转载的索引。两个索引都用 `CONCURRENTLY`，不锁表。没有新环境变量。要注意：
+
+- 不回填旧资料：升级后每判一条资料就记下它的指纹，所以转载要等两周的资料攒起来才认得全，这期间没认出来的照常判断。
+- 认成转载的资料不再出现在“全部动态”、精选、RSS 和接口的列表里，原文替它出面；它仍算一家报道（“另外 N 家也报道了”、日报的报道家数、热度）。以前每篇转载都占一个列表位置，升级后列表会短一些。
+- 后台“内容诊断”里转载标着“转载”并链到原文；认错的点“重新评估”，按它自己的全文重判。编辑撤回或修改了原文，转了它的资料自动回到队列重新判断，不再沿用这篇原文的判断，通常会多几次模型调用。
+- 指纹距离和最短字数是起始值（`3` 位、`200` 字），上线后用 `scripts/eval-copies.ts` 按 [精选与校准](selection.md#5-认转载校准指纹距离和最短字数) 校准。
+
+**明显的同一件事可以不问模型（AI-signal-desk）**：没有数据库迁移，没有新环境变量，默认关闭，升级后归组和原来一样。要打开，先攒几周归组记录，用 `scripts/eval-recall-thresholds.ts` 选门槛，再把数字写进 `packages/backend/src/events/group.ts` 的 `AUTO_ATTACH`，见 [事件归组](grouping.md#明显的同一件事不问模型)。打开后这样归的报道在后台“内容诊断”的归组记录里是 `auto`，没有模型回执。
+
+**评分改为五个维度（AI-signal-desk）**：评分模型不再自己算总分，改为输出内容类型、五个维度（0–10）和 `thin`，总分由 `industry/selection.ts` 新增的 `weights`（每个内容类型一行权重，和原来提示词里的权重表相同）与 `thinCap` 合成。没有数据库迁移，没有新环境变量；已经判过的资料不会重算，之后的新资料按新格式评分，五个维度存在判断记录的 `output.scoreAxes` 里。要注意：
+
+- **自己改过 `industry/prompts/selection-score.md` 的**，合并时把输出改成新的七个字段（见示范提示词末尾），并把权重表搬到 `industry/selection.ts` 的 `weights`；还在输出 `attentionScore` 的提示词会让每次评分都因格式不对而失败。
+- 自己改过 `industry/selection.ts` 的，补上 `weights` 和 `thinCap`，不补通不过类型检查。
+- 上线前后各用 `scripts/eval-selection.ts` 在自己标注的样本上跑一遍（见 [精选与校准](selection.md)），门槛只在扫描结果的最佳值移动时再改。
+- `industry/selection.ts` 还多了 `secondScoreWithin`（默认 `101`，总是评两次，和原来一样）：第一次评分离门槛和两条下限都足够远时不评第二次。改小之前按 [精选与校准](selection.md#4-少评一次分校准-secondscorewithin) 用已有记录校准。
+
+**试用 Jev（AI-signal-desk）**：新增选填的 `TYPESAFE_BASE_URL`、`TYPESAFE_API_KEY`，`site/models.ts` 多了预设 `jev`（`api: "systemone"`，只能影子运行，不能切换成某一步的模型，环境变量里填给某一步会被当作无效名称略过），`industry/decisions.ts` 是它的判断题。没有数据库迁移：worker 启动时在 `budgets` 补一行 `typesafe`（已有的不动），后台“模型与评测”的“影子运行”开关存在 `settings` 的 `shadow.prefilter`、`shadow.score`，新的定时任务 `models.shadow` 只在开关打开时调用。不填 key、不打开开关就什么都不会发出去。自己维护 `site/models.ts` 的站，不想要这个预设可以删掉，删掉后影子运行的按钮不再出现。怎么试见 [精选与校准](selection.md#试用-jev)。后台的 token 列现在也算上 `input_tokens`、`output_tokens` 这种用量写法。
 
 **2026 年 10 月 31 日的引擎同步**有三个数据库迁移（`0090`–`0092`），照下面的命令更新时 setup 会跑它们：信源多一列可选的类别 `selection_class`，反馈多了 `kind`（类型）和 `idea`（归入的建议）两列，都可以为空，旧数据不用改。没有必填的新环境变量。要注意的变化：
 
@@ -98,6 +178,10 @@ docker compose run --rm setup && docker compose up -d
 新迁移遇到长期占锁会报出文件名和等待超时，先处理占锁事务，再重跑 setup，不要跳过迁移或改写迁移账本。并发索引创建中断可能留下无效索引：核实报错中的对象后，用 `DROP INDEX CONCURRENTLY <索引名>` 清理该失败索引再重跑；有效但定义不同的同名索引须先核对差异。这些保护不改变上述 Docker 更新顺序，跨旧版本升级仍可能执行历史上的破坏性迁移。
 
 下面按时间从新到旧列出每次更新要注意的事。
+
+#### 首发、单一来源和信源的 30 天统计（2026 年 11 月 9 日）
+
+没有迁移，没有新的环境变量。事件页标出每个进展的首发报道和只有单一来源的事件（[怎么算](sources.md#分级参与方式与全文)）；后台“信源”页多了近 30 天的收录、精选率和首报几列，信源周报列出首报最多的几个信源（[定分级的参考](sources.md#定分级的参考)）。公开接口只加字段、不改已有字段：`/api/v1/stories/{publicId}` 和 MCP 的事件多了 `singleSource`，每篇报道多了 `firstRelease`。事件综述的输入把首发排在最前；已有的综述不会因此重写，事件的报道有变化时才按新的输入写。
 
 #### 百度主动推送（2026 年 11 月 8 日）
 
@@ -278,8 +362,8 @@ docker compose logs -f --tail 100 api worker web
 
 ## 花多少钱
 
-- **模型**：每条新资料先预筛一次；过了预筛的再评两次分、做一次结构化、写一次标题摘要，然后归组（有相近的报道时才调用），另外还有事件综述、周报月报的总述和精选的全文翻译。空正文、纯链接的 X 帖子不调用写作或翻译模型。日报按规则编排，不调用模型。我们用示范信源在本地试跑，第一次导入的 152 条资料一共用了大约 930 次模型调用。之后每天用多少，取决于你的信源每天更新多少条。后台“模型与评测”页能看到每一步的调用次数和输入输出 token 数。
-- **付费采集**（X、公众号、Jina）：按请求计费，默认不启用，填了 key 才会用。
+- **模型**：每条新资料先预筛一次；过了预筛的再评两次分（把 `secondScoreWithin` 调小后，第一次离各条线都远的只评一次）、做一次结构化、写一次标题摘要，然后归组（有相近的报道时才调用），另外还有事件综述、周报月报的总述和精选的全文翻译。空正文、纯链接的 X 帖子不调用写作或翻译模型。日报按规则编排，不调用模型。我们用示范信源在本地试跑，第一次导入的 152 条资料一共用了大约 930 次模型调用。之后每天用多少，取决于你的信源每天更新多少条。后台“模型与评测”页能看到每一步的调用次数和输入输出 token 数。
+- **付费采集**（X、公众号、Jina）：按请求计费，默认不启用，填了 key 才会用。Jina 只读直接抓取和 Defuddle 都读不出正文的页面，配了自建渲染时还排在它后面（见 [用自己的浏览器渲染正文](#用自己的浏览器渲染正文)）。
 - 所有付费服务都有每分钟、每小时、每天的调用上限（后台“设置 → 付费请求上限”），超过就暂停，不会一夜之间刷爆账单。填 0 表示立即停用这个服务。
 
 想省钱，按这个顺序来：
@@ -288,6 +372,27 @@ docker compose logs -f --tail 100 api worker web
 2. 确认关了思考模式：思考过程按输出 token 计费，`.env.example` 里的 `LLM_EXTRA_JSON` 写了怎么关。
 3. 量大的步骤换便宜的模型：`.env` 里可以每一步单独选（`PREFILTER_MODEL`、`SCORE_MODEL`、`STRUCTURE_MODEL`……），也能在“模型与评测”页改。换评分模型之前，用 `scripts/eval-selection.ts` 在同一批样本上比一比，别省了钱却选不准。
 4. 少放进无关的资料：花费基本跟每天进来的条数成正比。综合新闻站尽量只订和你方向相关的栏目，在“信源”页调低更新频率，暂停量大却很少入选的信源。
+
+### 后台的费用怎么算
+
+“模型与评测”页最上面是这段时间所有付费请求的费用合计，按币种分开。服务商返回了金额的照记（比如极致了）；没返回的，客户端按计费单位推算（Jina 按 token、SocialData 按条数）；模型调用大多不返回金额，按你填的单价推算。下面先是每一步模型的明细，最后的“其他付费请求”是向量、读网页、X 和公众号这类不属于某一步模型的请求。
+
+没有金额也没有单价的调用显示“未定价”，不计入合计。单价写在数据库的 `service_prices` 表里，每百万 token 一个价，按服务商的价格页填：
+
+```bash
+docker compose exec -T db psql -U aihot aihot <<'SQL'
+INSERT INTO service_prices (service, model, currency, input_per_mtok, cached_per_mtok, output_per_mtok)
+VALUES ('deepseek', 'deepseek-flash', 'CNY', 1.0, 0.1, 2.0)
+ON CONFLICT (service, model) DO UPDATE
+  SET currency = EXCLUDED.currency, input_per_mtok = EXCLUDED.input_per_mtok,
+      cached_per_mtok = EXCLUDED.cached_per_mtok, output_per_mtok = EXCLUDED.output_per_mtok, updated_at = now();
+SQL
+```
+
+- 上面的数字是示例，不是哪家服务商的真实价格。
+- `service`、`model` 和 `site/models.ts` 里预设的写法一样；默认预设的 `service` 是 `llm`，`model` 是 `LLM_MODEL` 的值。`model` 填 `''` 表示这个服务的所有模型都按这一个价。向量请求的 `service` 是 `dashscope`，设了自己的向量服务时是 `embedding`。
+- `currency` 只能是 `CNY` 或 `USD`。`cached_per_mtok` 不填时，命中缓存的 token 也按输入价算。
+- 估算不存下来，每次打开页面按当时的单价算，所以改了单价，过去的调用也按新价显示。
 
 ## 不用 Docker
 

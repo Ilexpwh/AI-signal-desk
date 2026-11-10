@@ -62,9 +62,26 @@ services:
     # Let the worker drain backups and paid calls (STOP_TIMEOUT_MS, 470 s), then close its database.
     # Docker sends SIGTERM to the worker first; after this window it kills the remaining processes.
     stop_grace_period: 515s
+    # The render network has only the worker and the optional renderer below on it.
+    networks: [default, render]
     depends_on:
       setup:
         condition: service_completed_successfully
+
+  # Optional: a browser that renders article pages the direct fetch cannot read, before paid Jina
+  # (docker compose --profile render up -d; RENDER_URL and RENDER_TOKEN in .env, see docs/deploy.md).
+  # It fetches pages itself, past the address checks of the fetcher, so it is on a network of its own
+  # without published ports, and the host has to keep that network from private addresses.
+  render:
+    image: unclecode/crawl4ai:0.9.2
+    profiles: ["render"]
+    restart: unless-stopped
+    shm_size: 1g
+    environment:
+      # Required: without a token Crawl4AI answers no one outside its container, and the worker sends
+      # nothing without one (the page being rendered must not be able to drive the service).
+      CRAWL4AI_API_TOKEN: ${RENDER_TOKEN:-}
+    networks: [render]
 
   web:
     <<: *app
@@ -98,6 +115,9 @@ services:
       - caddy:/data
     depends_on:
       - web
+
+networks:
+  render: {}
 
 volumes:
   db: {}

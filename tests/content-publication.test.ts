@@ -10,6 +10,7 @@ import { loadGroupReports } from "@aihot/backend/publication/groups";
 import { loadItemDetail } from "@aihot/backend/publication/detail";
 import { loadStoryDetail, v1HotTopics, v1Story } from "@aihot/backend/publication/stories";
 import { candidates } from "@aihot/backend/reports/edition";
+import { beijingDate } from "@aihot/contracts/time";
 import { composeStoryDigest, DIGEST_PROMPT_VERSION, DIGEST_SYSTEM, DigestSchema } from "@aihot/backend/events/digest";
 import { chatJson } from "@aihot/backend/providers/llm";
 import { computeHotRanking } from "@aihot/backend/events/hot";
@@ -18,21 +19,31 @@ import { overrideFields, setVisibility } from "@aihot/backend/admin/content";
 import { stopBoss } from "@aihot/backend/jobs/queue";
 import { latestHotRanking } from "@aihot/backend/publication/hot";
 import { storyTexts } from "@aihot/backend/publication/story-text";
+import { storyAnswer } from "@aihot/backend/publication/agent";
+import { factSources } from "@aihot/backend/publication/coverage";
+import { loadPool } from "@aihot/backend/publication/pool";
+import { digestReports } from "@aihot/backend/publication/story-evidence";
+import { publishArticle } from "@aihot/backend/publication/publish";
 
 const key = `evidence-${tag()}`;
 const now = new Date();
 const at = (hours: number) => new Date(+now - hours * 3600_000);
 let digestPrompt = "";
 let digestHold: { entered: ReturnType<typeof gate<void>>; release: ReturnType<typeof gate<void>> } | null = null;
+/** What the digest model writes, given the report ids its request lists; by default DIGEST, each sentence citing the first. */
+let digestAnswer: ((ids: string[]) => Array<{ text: string; reports: string[]; newParagraph?: boolean }>) | null = null;
+const DIGEST = ["OpenAI 发布 Dots，对话可以照常使用，但自主执行任务仍然消耗额度。", "这项限制只针对自主执行的任务，普通对话不受影响，用户可以照常使用对话功能。", "需要长时间自主运行的任务会持续占用额度，使用前应留意剩余的额度。"];
 const provider = await stub(async (_hit, req) => {
   digestPrompt = JSON.parse(req.body).messages[1].content;
+  const ids = [...digestPrompt.matchAll(/报道 (\S+?)｜/g)].map((m) => m[1]!);
+  const sentences = digestAnswer ? digestAnswer(ids) : DIGEST.map((text) => ({ text, reports: [ids[0]!] }));
   if (digestHold) {
     const hold = digestHold;
     digestHold = null;
     hold.entered.open();
     await hold.release.promise;
   }
-  return { id: "local", choices: [{ message: { content: JSON.stringify({ title: "OpenAI 发布 Dots", digest: "Dots 的对话可用，但自主执行任务仍然消耗额度。", latest: "模型生成的无关最新进展不得使用" }) } }], usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } };
+  return { id: "local", choices: [{ message: { content: JSON.stringify({ title: "OpenAI 发布 Dots", sentences, latest: "模型生成的无关最新进展不得使用" }) } }], usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } };
 });
 process.env.DEEPSEEK_BASE_URL = `${provider.url}/v1`;
 process.env.DEEPSEEK_API_KEY = "test-key";
@@ -129,6 +140,62 @@ test("mentions cannot choose a timeline origin, anchor, representative, or a lat
   assert.ok(!firstParty.cards.some(c => c.item.id === official), "a stale true projection flag cannot put T1_5 into first-party channel");
 });
 
+// 首发 is the party's own release, not whoever was fastest: a media scoop or an earlier roundup mention
+// cannot take it, and every exit marks the same report; the digest reads it before the reports relaying it.
+test("each fact's earliest official or owner report is its 首发 on the story page, every machine exit and the digest", async () => {
+  const media = await source("first-media", "T2");
+  const organization = await source("first-organization", "T1_5", "openai", "organization");
+  const t1 = await source("first-t1", "T1");
+  const g = await story();
+  const scoop = await report(media, g, { title: "媒体抢先报道 Dots", hours: 6 });
+  const release = await report(organization, g, { title: "OpenAI 账号发布 Dots", hours: 5 });
+  const blog = await report(t1, g, { title: "官网随后发布 Dots", hours: 4 });
+  const mention = await report(t1, g, { title: "更早的周报顺带提到", hours: 8, role: "mention" });
+  const [other] = await sql`INSERT INTO facts (public_id,story_id,title,subject) VALUES (${`f-${randomUUID()}`},${g.storyId},'Dots 上架应用商店','OpenAI') RETURNING id`;
+  const relayed = await report(media, { ...g, factId: Number(other!.id) }, { title: "媒体转述上架消息", hours: 2 });
+
+  const site = (await loadStoryDetail(g.storyId, now))!;
+  const marked = (rows: { id: string; firstRelease: boolean }[]) => rows.filter((r) => r.firstRelease).map((r) => r.id);
+  assert.deepEqual(marked(site.timeline), [release], "only the owner's account, before T1, and the fact without an official report has none");
+  assert.ok(site.timeline.some((r) => r.id === mention) && site.timeline.some((r) => r.id === scoop));
+  assert.deepEqual(marked(site.officialReports), [], "the T1 blog came later");
+  const api = (await v1Story(g.storyId))!.story;
+  assert.deepEqual(marked(api.reports), [release]);
+  assert.equal(site.singleSource, false);
+  assert.equal(api.singleSource, false);
+  assert.match(storyAnswer(api, 20, "http"), /OpenAI 账号发布 Dots/);
+  assert.match(storyAnswer(api, 20, "http"), /first-organization（首发）/);
+
+  assert.equal((await composeStoryDigest(g.storyId)).updated, true);
+  const lines = digestPrompt.split("\n").filter((line) => line.includes("报道 ") && line.includes("｜事实 "));
+  assert.equal(lines[0], lines.find((line) => line.includes(release)), "the 首发 is listed first");
+  assert.ok(lines[0]!.startsWith("【新】【首发】报道"));
+  assert.deepEqual(lines.slice(1).map((line) => [scoop, blog, relayed].find((id) => line.includes(id))), [scoop, blog, relayed], "the rest by time");
+  assert.match(digestPrompt, /标【首发】的是官方或当事方自己的账号/);
+});
+
+// 单一来源 counts independent actors, as heat does: two outlets of one media matrix are one; an official or
+// owner report is never single-sourced.
+test("a story only one participant reports, none of it official or the owner's, is single-source", async () => {
+  const a = await source("single-a", "T2");
+  const b = await source("single-b", "T2");
+  await sql`UPDATE sources SET signal_group_id = ${`${key}-matrix`} WHERE id IN ${sql([a, b])}`;
+  const g = await story();
+  await report(a, g, { title: "同一媒体矩阵的报道", hours: 3 });
+  await report(b, g, { title: "同一媒体矩阵的转载", hours: 2 });
+  const site = (await loadStoryDetail(g.storyId, now))!;
+  assert.equal(site.sourceCount, 2);
+  assert.equal(site.singleSource, true);
+  assert.equal((await v1Story(g.storyId))!.story.singleSource, true);
+  assert.match(storyAnswer((await v1Story(g.storyId))!.story, 20, "http"), /单一来源[^\n]*\n[\s\S]*只有一个来源在报道/);
+  await report(await source("single-other", "T2"), g, { title: "另一家独立报道", hours: 1 });
+  assert.equal((await loadStoryDetail(g.storyId, now))!.singleSource, false);
+
+  const owned = await story();
+  await report(await source("single-owner", "T1_5", "openai", "organization"), owned, { title: "OpenAI 账号独家发布", hours: 1 });
+  assert.equal((await loadStoryDetail(owned.storyId, now))!.singleSource, false, "the party's own account speaks for it");
+});
+
 // The detail's group badge and its expanded report list must count the same evidence, even while
 // an old projection still points to a fact after a report became a mention or composite.
 test("item detail counts the same fact evidence as its expanded group", async () => {
@@ -147,6 +214,60 @@ test("item detail counts the same fact evidence as its expanded group", async ()
   assert.equal(expanded.reports.length, 2);
   assert.equal(detail.item.group!.reportCount, expanded.reports.length);
   assert.equal(detail.item.group!.additionalSourceCount, 1);
+});
+
+// A copy (editorial/copies.ts) is never listed itself, but its source did report the fact.
+test("a copy counts toward its fact's coverage everywhere it is counted, and is listed nowhere", async () => {
+  const s = await source("copy-original", "T1");
+  const other = await source("copy-reprint", "T2");
+  const g = await story();
+  const main = await report(s, g, { title: "原文报道", hours: 3 });
+  const copy = await report(other, g, { title: "转载报道", hours: 2, selected: false });
+  const own = `${key}-copy`;
+  await sql`UPDATE publications SET tags = ${[own]} WHERE article_id = ${main}`;
+  await sql`UPDATE analyses SET tags = ${[own]}, output = output || jsonb_build_object('copyOf', ${main}::text) WHERE article_id = ${copy}`;
+  await publishArticle(copy);
+
+  const detail = await loadItemDetail(main, "zh", now);
+  assert.ok(detail.kind === "found");
+  assert.deepEqual([detail.item.group!.reportCount, detail.item.group!.additionalSourceCount], [2, 1]);
+  const expanded = (await loadGroupReports({ factPublicId: g.factPublicId, channel: "all", category: null, tag: own }, now))!;
+  assert.deepEqual(expanded.reports.map((r) => r.id).sort(), [main, copy].sort());
+  const card = (await loadTimeline({ channel: "all", category: null, tag: own, now })).cards.find((c) => c.key === `f${g.factId}`)!;
+  assert.deepEqual([card.item.id, card.group!.reportCount, card.group!.additionalSourceCount], [main, 2, 1]);
+  assert.deepEqual((await factSources([g.factId], now)).get(g.factId)?.sort(), [other, s].sort());
+
+  assert.deepEqual((await loadPool({ channel: "all", category: null, tag: own, now })).items.map((i) => i.id), [main]);
+  assert.deepEqual((await digestReports(sql, [g.storyId], now)).map((r) => r.id), [main], "the original's words stand for it");
+
+  await sql`UPDATE publications SET visibility = 'withdrawn' WHERE article_id = ${copy}`;
+  assert.deepEqual((await factSources([g.factId], now)).get(g.factId), [s], "a withdrawn copy stops counting");
+  const after = await loadItemDetail(main, "zh", now);
+  assert.ok(after.kind === "found");
+  assert.equal(after.item.group!.reportCount, 1);
+});
+
+// Coverage leaves out only what keeps a copy out of lists: what would keep its material out (a block,
+// a source no longer editorial) keeps it out of the count too.
+test("a copy its own judgement or source would not list is no coverage either", async () => {
+  const s = await source("copy-scope-original", "T1");
+  const other = await source("copy-scope-reprint", "T2");
+  const g = await story();
+  const main = await report(s, g, { title: "原文报道", hours: 3 });
+  const copy = await report(other, g, { title: "转载报道", hours: 2, selected: false });
+  await sql`UPDATE analyses SET output = output || jsonb_build_object('copyOf', ${main}::text) WHERE article_id = ${copy}`;
+  const counted = async () => {
+    await publishArticle(copy);
+    const detail = await loadItemDetail(main, "zh", now);
+    assert.ok(detail.kind === "found");
+    return [(await factSources([g.factId], now)).get(g.factId)?.length, detail.item.group!.reportCount];
+  };
+  assert.deepEqual(await counted(), [2, 2]);
+  await sql`UPDATE analyses SET relevance = 'block' WHERE article_id = ${copy}`;
+  assert.deepEqual(await counted(), [1, 1], "a blocked copy");
+  await sql`UPDATE analyses SET relevance = 'pass' WHERE article_id = ${copy}`;
+  await sql`UPDATE sources SET participation_mode = 'hot_signal' WHERE id = ${other}`;
+  assert.deepEqual(await counted(), [1, 1], "a copy from a source that only signals heat");
 });
 
 // A newer archive report may remain readable without qualifying as news. It cannot become the
@@ -228,6 +349,101 @@ test("rewriting a story digest uses the current reports and prompt and is audite
   const [entry] = await sql`SELECT actor, reason, after FROM audit_log WHERE action='story.rewrite-digest' AND subject=${`story:${g.storyId}`}`;
   assert.deepEqual([entry!.actor, entry!.reason, entry!.after.updated], ["ops-script", "digest prompt changed", true]);
   await assert.rejects(rewriteStoryDigest(-1, "missing", "ops-script"), /story not found/);
+});
+
+// A digest sentence is published only when the reports it cites carry what it says: their numbers, dates
+// and Latin-script names. The story page marks each sentence with those reports; other readers get the text.
+test("a digest publishes only the sentences its cited reports support, each with its citations", async () => {
+  const s = await source("digest-citations", "T1");
+  const g = await story();
+  const quota = await report(s, g, { title: "Dots 每月提供 500 次自主任务额度", hours: 3 });
+  const price = await report(s, g, { title: "Dots 订阅价格公布", hours: 2 });
+  const supported = "Dots 每月提供 500 次自主任务额度。";
+  digestAnswer = () => [
+    { text: DIGEST[0]!, reports: [quota] },
+    { text: "这句没有标出处。", reports: [] },
+    { text: "这句引用了请求里没有的报道。", reports: [`${key}-unlisted`] },
+    { text: "Dots 于 2 月 30 日开放订阅。", reports: [quota], newParagraph: true },
+    { text: supported, reports: [price] },
+    { text: supported, reports: [quota, price] },
+    { text: DIGEST[1]!, reports: [price], newParagraph: true },
+    { text: DIGEST[2]!, reports: [quota] },
+  ];
+  try {
+    assert.equal((await composeStoryDigest(g.storyId)).updated, true);
+  } finally { digestAnswer = null; }
+  const expected = `${DIGEST[0]}\n\n${supported}\n\n${DIGEST[1]}${DIGEST[2]}`;
+  const site = (await loadStoryDetail(g.storyId, now))!;
+  assert.equal(site.digest, expected, "uncited, wrongly cited and unsupported sentences are dropped; a dropped paragraph opening passes to the next kept sentence");
+  assert.equal((await v1Story(g.storyId))!.story.digest, expected, "every other reader keeps reading the joined text");
+  assert.deepEqual(site.digestSentences!.map((x) => [x.text, x.newParagraph, x.cites.map((c) => [c.n, c.id])]), [
+    [DIGEST[0], false, [[1, quota]]],
+    [supported, true, [[1, quota], [2, price]]],
+    [DIGEST[1], true, [[2, price]]],
+    [DIGEST[2], false, [[1, quota]]],
+  ]);
+  assert.equal(site.digestSentences![0]!.cites[0]!.title, "Dots 每月提供 500 次自主任务额度");
+});
+
+test("a digest too short once its unsupported sentences are dropped keeps the previous version, or the story has none; a whole one is published however short", async () => {
+  const s = await source("digest-short", "T1");
+  const g = await story();
+  await report(s, g, { title: "Dots 正式发布", hours: 3 });
+  assert.equal((await composeStoryDigest(g.storyId)).updated, true);
+  const [before] = await sql`SELECT digest, version FROM stories WHERE id=${g.storyId}`;
+  const calls = provider.hits();
+  digestAnswer = (ids) => [{ text: DIGEST[0]!, reports: [ids[0]!] }, { text: "Dots 已有 3000 万用户，增长很快，远超同类产品。", reports: [ids[0]!] }];
+  try {
+    assert.deepEqual(await composeStoryDigest(g.storyId, { rewrite: true }), { updated: false, tooShort: true });
+    assert.equal(provider.hits(), calls + 1);
+    const [after] = await sql`SELECT digest, version FROM stories WHERE id=${g.storyId}`;
+    assert.deepEqual({ ...after }, { ...before });
+    assert.equal((await loadStoryDetail(g.storyId, now))!.digest, before!.digest, "readers keep the previous version");
+
+    const fresh = await story();
+    await report(s, fresh, { title: "Dots 上架应用商店", hours: 2 });
+    assert.deepEqual(await composeStoryDigest(fresh.storyId), { updated: false, tooShort: true });
+    const page = (await loadStoryDetail(fresh.storyId, now))!;
+    assert.deepEqual([page.digest, page.digestSentences], [null, null]);
+    assert.equal(page.excerpt?.text, "Dots 上架应用商店", "the story opens with its report's summary, as without a digest");
+    assert.equal((await sql`SELECT 1 FROM story_digests WHERE story_id=${fresh.storyId}`).length, 0);
+
+    // A thin story's short digest, nothing dropped from it: published as before. The date it gives is its report's.
+    const thin = await story();
+    const opened = await report(s, thin, { title: "Dots 开放下载", hours: 1 });
+    const [, month, day] = beijingDate(at(1)).split("-").map(Number);
+    const dated = `${month} 月 ${day} 日，Dots 开放下载。`;
+    digestAnswer = () => [{ text: dated, reports: [opened] }];
+    assert.equal((await composeStoryDigest(thin.storyId)).updated, true);
+    assert.equal((await loadStoryDetail(thin.storyId, now))!.digest, dated);
+  } finally { digestAnswer = null; }
+});
+
+// Another outlet repeating a fact the digest covers adds nothing to it; a fact it does not cover yet or a
+// first-hand report does, and the version after it reads every report it skipped as new.
+test("new reports rewrite the digest only when they add a fact or a first-hand report", async () => {
+  const media = await source("trigger-media", "T2");
+  const g = await story();
+  await report(media, g, { title: "媒体报道 Dots 发布", hours: 6 });
+  assert.equal((await composeStoryDigest(g.storyId)).updated, true);
+  const written = (await loadStoryDetail(g.storyId, now))!.digest;
+  const calls = provider.hits();
+  const relay = await report(await source("trigger-relay", "T2"), g, { title: "又一家媒体转述 Dots 发布", hours: 5 });
+  assert.equal((await composeStoryDigest(g.storyId)).updated, false, "another outlet repeating a covered fact");
+  assert.equal(provider.hits(), calls);
+  assert.equal((await loadStoryDetail(g.storyId, now))!.digest, written, "its page keeps showing the digest");
+
+  await report(await source("trigger-official", "T1_5", "openai", "organization"), g, { title: "OpenAI 账号发布 Dots", hours: 4 });
+  assert.equal((await composeStoryDigest(g.storyId)).updated, true, "a first-hand report of a covered fact");
+  assert.equal(provider.hits(), calls + 1);
+  assert.ok(digestPrompt.includes("上一版综述") && digestPrompt.includes(`【新】报道 ${relay}`), "written on from the previous version, the skipped report new to it");
+
+  await report(await source("trigger-other", "T2"), g, { title: "第三家媒体报道 Dots", hours: 3 });
+  assert.equal((await composeStoryDigest(g.storyId)).updated, false);
+  const [listing] = await sql`INSERT INTO facts (public_id,story_id,title,subject) VALUES (${`f-${randomUUID()}`},${g.storyId},'Dots 上架应用商店','OpenAI') RETURNING id`;
+  await report(media, { ...g, factId: Number(listing!.id) }, { title: "媒体报道 Dots 上架应用商店", hours: 2 });
+  assert.equal((await composeStoryDigest(g.storyId)).updated, true, "a fact the digest does not cover yet");
+  assert.equal(provider.hits(), calls + 2);
 });
 
 // Recovery failures: restoring identical evidence must restore the saved digest without another

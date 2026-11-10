@@ -25,14 +25,23 @@
 
 ## 2. 分类、标签和主题：`industry/taxonomy.ts`、`industry/topics.json`
 
-[`industry/taxonomy.ts`](../industry/taxonomy.ts) 定义类别（`CATEGORIES`）、报头重点发布计数（`RELEASE`）、总述免核对通用词（`PLAIN_TERMS`）、内容类型（`ITEM_TYPES`）、标签词表与近义词（`CATEGORY_TAGS`、`TOPIC_TAGS`、`ENTITY_TAGS`、`TAG_SYNONYMS`），以及公司名录和防张冠李戴词典（`ENTITIES`、`IDENTITY_LEXICON`、`PUBLISHER_DOMAINS`、`IDENTITY_CONTEXT_ALIASES`）。各字段含义直接看文件内注释，改动时注意这几处联动：
+[`industry/taxonomy.ts`](../industry/taxonomy.ts) 定义类别（`CATEGORIES`）、报头重点发布计数（`RELEASE`）、总述免核对通用词（`PLAIN_TERMS`）、内容类型（`ITEM_TYPES`）、标签词表与近义词（`CATEGORY_TAGS`、`TOPIC_TAGS`、`ENTITY_TAGS`、`TAG_SYNONYMS`），公司名录和防张冠李戴词典（`ENTITIES`、`IDENTITY_LEXICON`、`PUBLISHER_DOMAINS`、`IDENTITY_CONTEXT_ALIASES`），以及主题“上升中”的门槛（`TOPIC_RISING`）。各字段含义直接看文件内注释，改动时注意这几处联动：
 
 - **网址里的 `key` 上线后不改**：`CATEGORIES` 的 `key` 会进网址和订阅地址（`/all?category=`、`/feed/category/<key>.xml`）。要让某一类在公开接口、RSS 和 MCP 里并进另一类发布（网页上仍分开），在 `site/site.ts` 的 `PUBLIC_CATEGORIES` 里配。
-- **和提示词同步**：改了 `CATEGORIES`、标签词表或 `ITEM_TYPES`，要同步改 `industry/prompts/structure.md`（归类原则与标签规则）、`content-understanding.md`（内容类型枚举）和 `selection-score.md`（各内容类型的五维权重表）。
+- **和提示词同步**：改了 `CATEGORIES`、标签词表或 `ITEM_TYPES`，要同步改 `industry/prompts/structure.md`（归类原则与标签规则）、`content-understanding.md`（内容类型枚举）、`selection-score.md`（内容类型的说明）和 `industry/selection.ts` 的 `weights`（每个内容类型的五维权重）；`industry/decisions.ts`（试用 Jev 的判断题）里的内容类型选项也跟着改，不改通不过类型检查。
 - **不需要防张冠李戴时可清空**：`IDENTITY_LEXICON`、`PUBLISHER_DOMAINS`、`IDENTITY_CONTEXT_ALIASES` 用来保证标题摘要里提到的公司在原文里出现过；你的行业不需要这项检查时设为空数组 `[]`。
+- **名录漏掉的名字**：结构抽取给每条事实写一个主体（`fact.subject`，几家公司用顿号、逗号或斜杠隔开）。其中对不上 `ENTITIES` 任何一家公司的名字和别名的（不分大小写和空格，要整个名字对上），记在这次判断的 `output.unmatchedSubjects` 里。后台“内容诊断”页（`/admin/content`，不输入搜索词时）列出“未收录主体”：近 30 天发现的资料里，最新一次判断写了它的不少于 3 篇的名字，按篇数排，附最近一篇的链接；“身份词典”一栏是 `IDENTITY_LEXICON` 在这个名字里认出的公司，多半是那家公司缺了这个别名。不调用模型，也不会自动改名录：要收录，自己在 `ENTITIES` 里加公司或别名（`aliases`、`orgNames`、`otherNames`），重新构建后生效，这个名字随即从列表里消失。对不上名录的主体，不算这家公司的一手发布（[信源](sources.md#分级参与方式与全文)的“首发”和代表报道），也不会归进公司主题。
+- **Wikidata 条目（`ENTITIES` 的 `wikidata`，选填）**：写成 `"Q…"`。文章页给搜索引擎的结构化数据（JSON-LD）里，`about` 是这篇报道的主体公司，`mentions` 是摘要里提到的其他公司（以有公司主题页的为准），都写成 `Organization`；写了 `wikidata` 的公司带上 `sameAs: https://www.wikidata.org/wiki/Q…`，没写的只有名字。哪家公司对应哪个条目由你来定，同名的条目很多（`Meta` 能搜出地名和人名），要看 Wikidata 上的描述再填。`node --use-system-ca scripts/wikidata-entities.ts [--entity <id>] [--limit 3]` 只读 Wikidata 的公开接口、只打印不改文件：没写 `wikidata` 的公司列出按名字搜到的候选条目和描述；写了的列出那个条目的中英文名称和别名里名录还没有的，要不要加进别名你自己看。
+- **IPTC 媒体主题（`CATEGORIES` 的 `iptc`，选填）**：写成 `{ code: "13000000", label: "science and technology" }`，`code` 是 [IPTC Media Topics](https://cv.iptc.org/newscodes/mediatopic/) 的 8 位编号，`label` 是它的英文名。写了的类别，公开接口 `/api/v1/items`、精选快照和变更（默认字段，`fields=minimal` 不带）以及 MCP 的最新、搜索结果，每条多一个 `iptc: { code, label }`；RSS 每条在原来的分类之后多一个 `<category domain="http://cv.iptc.org/newscodes/mediatopic/">13000000</category>`。不写就没有这些字段。读的时候才按类别查，改了以后所有条目一起变，不用重新发布；并进别的类别发布的（`PUBLIC_CATEGORIES.merge`），用它并进的那一类的 `iptc`。对应哪个主题由你来定。
 - **`industry/topics.json`**（主题目录 `/topics`）：站点启动时读取，改完重新构建（`docker compose up -d --build`）生效。分 `company`（公司与机构）、`field`（方向）、`genre`（内容形态）三组，`slug` 上线后不要改：
   - `company` 主题用 `entityId`（`ENTITIES` 的 id）收以这家公司为主体的报道；一篇报道的主体有几家公司时，标题里点了它的名才算。可选 `aliases`：搜索框里只搜这个词，也能找出这家公司的报道。
   - `field` 和 `genre` 主题用 `tags` 收打了这些标签的报道。
+- **主题的“上升中”**：每天 00:20（北京时间）定时任务 `topics.trend` 按北京时间的日子数一遍：每个主题当天有多少个事件被 `editorial` 信源报道（一个事件不管几篇报道只算一次，撤回的报道、只算热度的 `hot_signal` 信源不算），除以当天这样的事件总数，得到它当天的占比；再和它前 28 天的平均占比比，得出倍数。结果存在 `topic_trends` 表里，最近 7 天每次重算（晚到的报道和撤回都会算进去）。前 28 天里有事件的日子才进平均；这个主题前 28 天一次都没出现过的，没有倍数，也就不会“上升中”。某天的事件数不少于 `TOPIC_RISING.minStories`、倍数不低于 `TOPIC_RISING.ratio`，这个主题就在主题页、主题目录上标“上升中”（只看最近算出的那一天，最多是前天的；定时任务停了就不再标），周报也列出这一周里这样的主题（每个主题取倍数最高的那天，最多 5 个）。门槛在读的时候才用，改了马上生效，已经出过的周报不变。
+  - 默认的 `{ minStories: 3, ratio: 3 }` 是偏保守的起始值，不是校准出来的。站点跑上几周以后，用下面的查询看最近每个主题倍数最高的日子，挑出你认为真在升温的，再把门槛定在能留下它们、又不放进太多普通日子的位置：
+
+    ```bash
+    docker compose exec -T db psql -U aihot aihot -c "SELECT topic, day, stories, round(baseline, 4) AS baseline, round(ratio, 1) AS ratio FROM topic_trends WHERE day > current_date - 56 AND ratio IS NOT NULL ORDER BY ratio DESC LIMIT 60"
+    ```
 
 ## 3. 信源：`industry/sources.json`
 
@@ -59,14 +68,15 @@
 | 文件 | 作用 |
 |---|---|
 | `prefilter.md` | 预筛：这条资料是不是这个行业的事。宽召回，只拦明显无关的 |
-| `selection-score.md` | **评分标准**：给 0–100 分。里面有内容类型、五个维度、各类型的权重、必须正常评价的价值、必须压住的噪声 |
+| `selection-score.md` | **评分标准**：判内容类型、给五个维度各打 0–10 分（各类型的权重在 `industry/selection.ts`，系统合成 0–100 分）。里面有内容类型、五个维度、必须正常评价的价值、必须压住的噪声（写成各维度的上限） |
 | `content-understanding.md` | 入选和接近入选内容的写法：中文标题、答案先行的摘要、推荐理由（它也会给标签，但页面上的分类和标签来自 `structure.md`） |
 | `rules-domain.md` | 行业术语的翻译与保留规则（示例是 AI 术语：LLM 译作大语言模型、Token 保留英文……） |
 | `mend-wording.md` | 改用词：标题、摘要、推荐理由用了 `industry/wording.ts` 里列出的词时，让模型只改这些词 |
+| `verify-copy.md` | 核对文字：把入选和接近入选内容的标题、摘要拆成一条条说法，逐条对照原文判断有没有依据；只记录在后台，不改读者看到的文字 |
 | `summarize-*.md` | 其他内容的标题摘要写法 |
 | `structure.md` | 分类、标签、主体公司，判断是一条具体新闻还是讲多件事的综合稿，抽出新闻的事实（谁、做了什么、对什么，附原文出处和前提条件）。页面上的分类和标签、主题页、事件归组和日报都靠它 |
 | `group-*.md` | 事件归组：两篇报道是同一次发生、同一事件的后续，还是两件事；同时判断报道相对精选里已有的内容有没有新信息，没有的不进精选 |
-| `story-digest.md` | 事件页的综述（改之前用 [综述评测](story-digest-evaluation.md) 并排比较） |
+| `story-digest.md` | 事件页的综述，逐句列出依据的报道，出处对不上的句子不发布（见 [事件综述](grouping.md#事件综述)；改之前用 [综述评测](story-digest-evaluation.md) 并排比较） |
 | `report-period.md`、`report-period-sections.md` | 周报月报的总述和栏目导读（日报按规则编排，不用提示词） |
 | `translate-*.md` | 全文翻译 |
 
@@ -78,7 +88,7 @@
 
 ## 5. 门槛与校准：`industry/selection.ts`
 
-两次评分之和 ≥ 2 × 门槛才够分（够分的还要过归组时的去重，见 [精选与校准](selection.md)）。默认门槛（T1 60、T1_5 65、T2 76）是 AIHOT 在 AI 领域校准出来的。`classes` 是抬高门槛的信源类别（示例是 AI 行业的“生态与基础设施”“评测榜单”，换行业时换成你的类别或删空），`browseFloor` 是浏览“全部动态”的最低分（默认 40）。换了行业和提示词，需要重新校准：
+两次评分的平均 ≥ 门槛才够分（第一次离各条线都远时可以只评一次，见 `secondScoreWithin`）（够分的还要过归组时的去重，见 [精选与校准](selection.md)）。默认门槛（T1 60、T1_5 65、T2 76）是 AIHOT 在 AI 领域校准出来的。`classes` 是抬高门槛的信源类别（示例是 AI 行业的“生态与基础设施”“评测榜单”，换行业时换成你的类别或删空），`browseFloor` 是浏览“全部动态”的最低分（默认 40）。换了行业和提示词，需要重新校准：
 
 1. 从你的信源里挑 100–200 条资料，自己标“该选 / 不该选”，存成 `.data/gold.jsonl`（格式见 [精选与校准](selection.md)，`industry/gold.example.jsonl` 有两条示例）。
 2. 运行 `node --env-file=.env scripts/eval-selection.ts --gold .data/gold.jsonl`，看准确率、查准率、查全率，和不同门槛下的结果。

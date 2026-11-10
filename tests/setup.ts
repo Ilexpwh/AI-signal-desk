@@ -30,7 +30,8 @@ const STEP_MODELS: Record<string, [env: string, model: string]> = {
   prefilter: ["PREFILTER_MODEL", "qwen3.7-flash"], score: ["SCORE_MODEL", "glm-5.3-flash-selection"], understand: ["UNDERSTAND_MODEL", "glm-5.3-flash"],
   summarize: ["SUMMARIZE_MODEL", "deepseek-flash"], structure: ["STRUCTURE_MODEL", "qwen3.8-flash"], group: ["GROUP_MODEL", "deepseek-flash"],
   groupReview: ["GROUP_REVIEW_MODEL", "mimo-v2.6-flash"], digest: ["DIGEST_MODEL", "deepseek-flash"], report: ["REPORT_MODEL", "deepseek-flash"],
-  translate: ["TRANSLATE_MODEL", "deepseek-flash"], wording: ["WORDING_MODEL", "deepseek-flash"], feedback: ["FEEDBACK_MODEL", "qwen3.7-flash"],
+  translate: ["TRANSLATE_MODEL", "deepseek-flash"], wording: ["WORDING_MODEL", "deepseek-flash"], verify: ["VERIFY_MODEL", "deepseek-flash"],
+  feedback: ["FEEDBACK_MODEL", "qwen3.7-flash"],
 };
 for (const [step, [env, model]] of Object.entries(STEP_MODELS)) if (!DEFAULTS[step]) process.env[env] ??= model;
 
@@ -51,14 +52,14 @@ export function pointModels(url: string, models = ["qwen3.7-flash", "glm-5.3-fla
  * A local HTTP stub standing in for a paid provider; `answer` builds every response from the request
  * (it may wait, to hold a request open while a test changes something).
  */
-export async function stub(answer: (hit: number, req: { url: string; body: string }) => unknown) {
+export async function stub(answer: (hit: number, req: { url: string; body: string; headers: http.IncomingHttpHeaders }) => unknown) {
   let hits = 0;
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", async () => {
       hits += 1;
-      const out = await answer(hits, { url: req.url ?? "/", body: Buffer.concat(chunks).toString("utf8") });
+      const out = await answer(hits, { url: req.url ?? "/", body: Buffer.concat(chunks).toString("utf8"), headers: req.headers });
       const reply = out instanceof Reply ? out : { status: 200, json: out };
       res.writeHead(reply.status, { "content-type": "application/json" });
       res.end(JSON.stringify(reply.json));

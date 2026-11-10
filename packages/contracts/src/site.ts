@@ -60,6 +60,14 @@ export interface StoryRef {
   title: string;
 }
 
+/** A company of the site's vocabulary (industry/taxonomy.ts ENTITIES), and its Wikidata item when the site mapped one. */
+export interface EntityRef {
+  id: string;
+  name: string;
+  /** A Wikidata item id ("Q…"). */
+  wikidata: string | null;
+}
+
 /** What every site answer about an article carries; a card and a page each add the X post in their own form. */
 export interface ItemSummary {
   id: string;
@@ -183,6 +191,8 @@ export interface SiteItemDetail extends ItemSummary {
   bodyLanguage: "zh" | "original";
   /** The pages its summary names (mentions.ts). */
   mentions: MentionTarget[];
+  /** The companies it is about (its subjects), and the other companies its summary names (by their topic pages). */
+  entities: { about: EntityRef[]; mentions: EntityRef[] };
 }
 
 /** A fact's public reports under the list's filters: what "另外 N 家也报道了" opens. */
@@ -253,6 +263,16 @@ export interface StoryReportView {
   source: SourceRef & { firstParty: boolean };
   publishedAt: string;
   selected: boolean;
+  /** 首发: its fact's earliest report from T1 or the subject's own verified account. */
+  firstRelease: boolean;
+}
+
+/** A digest sentence and the reports it cites, each a numbered mark: a report keeps the number of its first citation. */
+export interface StoryDigestSentence {
+  text: string;
+  /** Opens a new paragraph. */
+  newParagraph: boolean;
+  cites: Array<{ n: number; id: string; title: string; sourceName: string }>;
 }
 
 export interface StoryFactView {
@@ -276,9 +296,13 @@ export interface StoryDetail {
   status: "active" | "watching" | "settled";
   reportCount: number;
   sourceCount: number;
+  /** 单一来源: one independent participant reports it, and none of its reports is T1 or the subject's own account. */
+  singleSource: boolean;
   firstReportAt: string | null;
   latestAt: string | null;
   digest: string | null;
+  /** The digest sentence by sentence with the reports each cites; null without a digest or for one written before citations. */
+  digestSentences: StoryDigestSentence[] | null;
   digestUpdatedAt: string | null;
   /** The story's own factual summary, when it has one. */
   summary: string | null;
@@ -369,6 +393,8 @@ export interface ReportDetail {
   next: string | null;
   /** The pages its paragraphs and summaries name (mentions.ts). */
   mentions: MentionTarget[];
+  /** A weekly's topics that broke out during its week, each on its strongest day, strongest first; absent on other issues. */
+  rising?: Array<TopicLink & TopicRising>;
 }
 
 export interface ReportIndexEntry {
@@ -489,6 +515,16 @@ export interface Brand {
   fill?: boolean;
 }
 
+/** A topic breaking out on a day (上升中): that day's trend (topic_trends) met industry/taxonomy.ts TOPIC_RISING. */
+export interface TopicRising {
+  /** The Beijing day. */
+  day: string;
+  /** Stories editorial sources reported about the topic that day. */
+  stories: number;
+  /** Their share of all that day's stories against the topic's mean share over the 28 days before, to one decimal. */
+  ratio: number;
+}
+
 export interface TopicSummary extends TopicLink {
   group: TopicGroupKey;
   definition: string;
@@ -502,6 +538,8 @@ export interface TopicSummary extends TopicLink {
   indexable: boolean;
   /** The newest selected report. */
   latest: { title: string; at: string } | null;
+  /** 上升中 on the newest day the trends counted, when that was yesterday or the day before. */
+  rising: TopicRising | null;
 }
 
 export interface TopicsResponse {

@@ -3510,6 +3510,28 @@
           },
           "attribution": {
             "$ref": "#/components/schemas/Attribution"
+          },
+          "iptc": {
+            "type": "object",
+            "required": [
+              "code",
+              "label"
+            ],
+            "description": "The IPTC Media Topic the site maps this item's category to (http://cv.iptc.org/newscodes/mediatopic/{code}). Present only when the site maps the category; omitted otherwise, including from fields=minimal. Derived from category, so it follows the site's current mapping.",
+            "properties": {
+              "code": {
+                "type": "string",
+                "examples": [
+                  "13000000"
+                ]
+              },
+              "label": {
+                "type": "string",
+                "examples": [
+                  "science and technology"
+                ]
+              }
+            }
           }
         }
       },
@@ -3812,6 +3834,7 @@
           "summary",
           "source",
           "publishedAt",
+          "firstRelease",
           "links"
         ],
         "properties": {
@@ -3846,6 +3869,10 @@
             "type": "string",
             "format": "date-time",
             "description": "When the original was published; if the original carries no reliable publication date, when it was collected instead."
+          },
+          "firstRelease": {
+            "type": "boolean",
+            "description": "The first release of its development: the earliest report from an official source or from the subject's own verified account. Cite it first."
           },
           "links": {
             "type": "object",
@@ -3909,6 +3936,7 @@
           "title",
           "status",
           "sourceCount",
+          "singleSource",
           "reportCount",
           "firstReportAt",
           "latestAt",
@@ -3936,6 +3964,10 @@
           "sourceCount": {
             "type": "integer",
             "minimum": 0
+          },
+          "singleSource": {
+            "type": "boolean",
+            "description": "Only one independent source reports the story (several channels of one outlet or company count as one), and none of its reports comes from an official source or the subject's own account. Say so when relaying it."
           },
           "reportCount": {
             "type": "integer",

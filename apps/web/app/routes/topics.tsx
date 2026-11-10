@@ -5,8 +5,9 @@ import type { TopicSummary, TopicsResponse } from "@aihot/contracts/site";
 import { apiGet, cachedPage } from "../lib/api.server";
 import { pageReuse } from "../lib/page-reuse";
 import { breadcrumbLd, pageMeta, siteUrl } from "../lib/seo";
-import { relativeTime } from "../lib/format";
+import { monthDay, relativeTime } from "../lib/format";
 import { IconChevronRight } from "../components/icons";
+import { Badge } from "../components/ui/Badge";
 import { IntentLink } from "../components/ui/IntentLink";
 import { BrandMark } from "../components/BrandMark";
 import { PhoneBar } from "../components/shell/PhoneBar";
@@ -74,6 +75,11 @@ function TopicCard({ t }: { t: TopicSummary }) {
             </span>
           )}
           {t.name}
+          {t.rising && (
+            <Badge tone="hot" title={`${monthDay(t.rising.day)} ${t.rising.stories} 个事件，占当天事件的比例是平时的 ${t.rising.ratio} 倍`}>
+              上升中
+            </Badge>
+          )}
         </span>
         <span className="mt-0.5 line-clamp-1 text-[12.5px] leading-[1.6] text-ink-4 lg:mt-1.5 lg:line-clamp-2 lg:flex-1 lg:text-[13px] lg:leading-[1.65] lg:text-ink-2">
           {t.latest?.title ?? t.definition}

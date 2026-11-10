@@ -16,7 +16,7 @@ flowchart LR
 | 进程 | 位置 | 做什么 |
 |---|---|---|
 | api | `apps/api/` | Fastify。网站自用接口（`/api/site/`）、公开 API（`/api/v1/`）、RSS、MCP、后台接口、图片代理、分享图 |
-| worker | `apps/worker/` | pg-boss 任务队列和定时任务：抓信源、调模型、归组、热度、日报、告警、清理 |
+| worker | `apps/worker/` | pg-boss 任务队列和定时任务：抓信源、调模型、归组、热度、主题趋势、日报、告警、清理 |
 | web | `apps/web/` | React Router 服务端渲染的网页。只通过 HTTP 读 api，不碰数据库 |
 
 业务代码都在 `packages/backend/`，前后端共用的类型和常量在 `packages/contracts/`。这个站自己的名字、文案、品牌和页面在 `site/`，行业的分类、信源、提示词和门槛在 `industry/`，只属于这个站的功能在 `modules/`（见下文“模块”）。
@@ -47,10 +47,10 @@ flowchart LR
 | `packages/backend/src/sources/` | 六种信源的读取器，抓取调度（`collect.ts`） |
 | `packages/backend/src/content/` | 资料入库、判重、正文提取和清洗 |
 | `packages/backend/src/editorial/` | 判断与写作：`analyze.ts`（流程）、`prompts.ts`（读提示词）、`models.ts`（每一步用哪个模型） |
-| `packages/backend/src/events/` | 事件归组、热度、事件综述 |
+| `packages/backend/src/events/` | 事件归组、热度、事件综述、主题趋势（`trends.ts`） |
 | `packages/backend/src/publication/` | 公开读取层 |
 | `packages/backend/src/reports/` | 日报、周报、月报 |
-| `packages/backend/src/providers/` | 模型、向量、X、公众号、Jina 的调用，回执与预算 |
+| `packages/backend/src/providers/` | 模型、向量、X、公众号、Jina 和自建浏览器渲染的调用，回执与预算 |
 | `packages/backend/src/notify/` | 飞书推送 |
 | `packages/backend/src/operations/` | 告警、备份、清理、IndexNow、百度推送 |
 | `packages/backend/src/admin/` | 后台接口 |

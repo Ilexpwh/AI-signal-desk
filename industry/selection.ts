@@ -1,10 +1,35 @@
-// 精选的门槛。评分标准本身写在 prompts/selection-score.md；这里只决定“多少分算入选”。
-// 每篇资料由评分模型独立打两次分（0–100），两次之和 ≥ 2 × 门槛才成为精选候选；
+// 精选的门槛和分数的合成方式。评分标准本身写在 prompts/selection-score.md：评分模型判内容类型、给五个维度打分，
+// 这里按类型的权重把五个维度合成 0–100 的分数，并决定“多少分算入选”。
+// 每篇资料由评分模型独立打两次分，两次之和 ≥ 2 × 门槛才成为精选候选；
 // 确认新闻身份与新增价值后，由发布规则决定展示（见 docs/selection.md），卡片上显示两次的平均分。
 // 门槛按信源分级区分：官方一手信源的门槛低一些，媒体和个人的高一些；信源类别再把某些官方信源的门槛抬高。
-// 改了门槛或评分提示词，用 scripts/eval-selection.ts 在你自己标注的样本上重跑一遍，再决定上线（见 docs/selection.md）。
+// 改了门槛、权重或评分提示词，用 scripts/eval-selection.ts 在你自己标注的样本上重跑一遍，再决定上线（见 docs/selection.md）。
+import type { ITEM_TYPES } from "./taxonomy.ts";
+
+type Axis = "sig" | "nov" | "cred" | "reson" | "act";
 
 export const SELECTION = {
+  /**
+   * 内容类型 → 五个维度的权重：分数 = sig×w1 + nov×w2 + cred×w3 + reson×w4 + act×w5。
+   * 每行之和必须是 10，五个维度各 0–10 分，所以分数落在 0–100。维度的含义写在 prompts/selection-score.md。
+   *   sig 实质份量 · nov 信息增量 · cred 证据强度 · reson 共振面 · act 可用性
+   */
+  weights: {
+    model_release: { sig: 3, nov: 2, cred: 2, reson: 2, act: 1 },
+    product_launch: { sig: 2, nov: 2, cred: 1, reson: 2, act: 3 },
+    tool_or_prompt: { sig: 1, nov: 2, cred: 1, reson: 2, act: 4 },
+    research_paper: { sig: 5, nov: 3, cred: 1, reson: 0, act: 1 },
+    industry_event: { sig: 3, nov: 1, cred: 2, reson: 4, act: 0 },
+    opinion_analysis: { sig: 1, nov: 3, cred: 1, reson: 4, act: 1 },
+    tutorial_explainer: { sig: 1, nov: 1, cred: 1, reson: 3, act: 4 },
+  } satisfies Record<(typeof ITEM_TYPES)[number], Record<Axis, number>>,
+  /** 标题与正文明显不符、或正文残缺到认不出对象、动作和阶段的资料（评分模型标 thin），分数不高于这个数。 */
+  thinCap: 30,
+  /**
+   * 第一次评分离信源门槛、understandFloor、browseFloor 都至少这么远时，不再评第二次，直接按第一次的分数判断。
+   * 101 表示总是评两次，0 表示总是只评一次。用已有判断记录里的两次分数校准（见 docs/selection.md），不要凭感觉改。
+   */
+  secondScoreWithin: 101,
   /**
    * 信源分级 → 入选门槛（平均分）。分级在后台“信源”里给每个源设置：
    *   T1 官方一手（官网、官方博客、机构）· T1_5 官方账号、准官方创作者 · T2 媒体与个人

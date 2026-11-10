@@ -412,14 +412,14 @@ test("v1 story matches the website's content and fallback ordering", async () =>
   await sql`UPDATE stories SET first_report_at = NULL, latest_at = NULL WHERE id = ${story!.id}`;
   const site = JSON.parse((await get(`/api/site/stories/${publicId}`)).body);
   const v1 = JSON.parse((await get(`/api/v1/stories/${publicId}`)).body).story;
-  assert.deepEqual({ publicId: v1.publicId, title: v1.title, sourceCount: v1.sourceCount, reportCount: v1.reportCount,
+  assert.deepEqual({ publicId: v1.publicId, title: v1.title, sourceCount: v1.sourceCount, singleSource: v1.singleSource, reportCount: v1.reportCount,
     firstReportAt: v1.firstReportAt, latestAt: v1.latestAt, digest: v1.digest, digestUpdatedAt: v1.digestUpdatedAt },
-  { publicId: site.publicId, title: site.title, sourceCount: site.sourceCount, reportCount: site.reportCount,
+  { publicId: site.publicId, title: site.title, sourceCount: site.sourceCount, singleSource: site.singleSource, reportCount: site.reportCount,
     firstReportAt: site.firstReportAt, latestAt: site.latestAt, digest: site.digest, digestUpdatedAt: site.digestUpdatedAt });
   assert.equal(v1.latest, site.latest);
   assert.equal(site.latestReport.id, second);
   assert.deepEqual(v1.reports.map(({ links: { original: _, ...links }, ...r }: any) => ({ ...r, links })), site.timeline.slice(0, 50).map((r: any) => ({ id: r.id, title: r.title, summary: r.summary,
-    source: { name: r.source.name, firstParty: r.source.firstParty }, publishedAt: r.publishedAt, links: { aihot: `${config.siteUrl}/items/${r.id}` } })));
+    source: { name: r.source.name, firstParty: r.source.firstParty }, publishedAt: r.publishedAt, firstRelease: r.firstRelease, links: { aihot: `${config.siteUrl}/items/${r.id}` } })));
 });
 
 // An event's public id is kept by search engines and installed clients: once merged, it must lead to the

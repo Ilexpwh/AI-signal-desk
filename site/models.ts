@@ -43,6 +43,11 @@ export const PRESETS: Record<string, ModelPreset> = {
     service: "dashscope", model: "qwen3-vl-flash", baseUrlEnv: "DASHSCOPE_BASE_URL", apiKeyEnv: "DASHSCOPE_API_KEY",
     extra: { enable_thinking: false }, jsonMode: false, vision: true,
   },
+  // Jev（TypeSafe）不写文字，只回答 industry/decisions.ts 的判断题；只能在后台“模型与评测”里给预筛和评分做影子运行，
+  // 不能选作任何一步的模型。
+  jev: {
+    service: "typesafe", model: "jev-latest", baseUrlEnv: "TYPESAFE_BASE_URL", apiKeyEnv: "TYPESAFE_API_KEY", jsonMode: false, api: "systemone",
+  },
 };
 
 /**

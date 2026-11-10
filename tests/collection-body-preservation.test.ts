@@ -24,6 +24,10 @@ const server = http.createServer((req, res) => {
   }
   res.setHeader("content-type", "text/html");
   if (req.url === "/listing") return res.end(`<ul><li><a href="/complete">Complete article</a></li><li><a href="/pending">Pending article</a></li></ul>`);
+  if (req.url === "/declared-listing") return res.end(`<ul><li><a href="/declared">Declared article</a></li></ul>`);
+  // Client-rendered: the article is only in the page's structured data until a browser runs its script.
+  if (req.url === "/declared") return res.end(`<html><head><title>Declared article</title><meta property="article:published_time" content="${publishedAt.toISOString()}">
+    <script type="application/ld+json">${JSON.stringify({ "@type": "NewsArticle", headline: "Declared article", articleBody: alternate })}</script></head><body><div id="app"><p>Loading…</p></div></body></html>`);
   const title = req.url === "/complete" ? "Complete article" : "Pending article";
   res.end(`<html><head><title>${title}</title><meta property="article:published_time" content="${publishedAt.toISOString()}"></head><body><article><h1>${title}</h1><p>${alternate}</p></article></body></html>`);
 });
@@ -47,6 +51,14 @@ test("publication metadata recovery keeps a confirmed body and only fills an unc
   assert.ok(filled!.body_text.includes(alternate));
   assert.equal(filled!.body_status, "ok");
   assert.equal(filled!.published_at.toISOString(), publishedAt.toISOString());
+});
+
+test("the detail page fills a body Readability finds no article in with Defuddle's reading of it", async () => {
+  const sourceId = `body-declared-${T}`;
+  await sql`INSERT INTO sources(id,name,kind,config,tier,participation_mode,cursor) VALUES (${sourceId},'Declared body','web_list',${sql.json({ url: base + "/declared-listing", itemSelector: "li", titleSelector: "a", detail: { maxFetches: 10 } })},'T1','editorial',${sql.json({ initializedAt: new Date().toISOString() })})`;
+  assert.equal((await collectSource(sourceId)).status, "ok");
+  const [row] = await sql`SELECT body_text,body_status,published_at FROM articles WHERE source_id=${sourceId}`;
+  assert.deepEqual({ ...row }, { body_text: alternate, body_status: "ok", published_at: publishedAt }, "the article's own text, without the page's loading placeholder");
 });
 
 

@@ -1,6 +1,7 @@
 // Story digests on fixed cases, leaving every event as it is: the site's own digest request (system prompt,
 // input builder, model route, sampling, receipts) and, with --system, a candidate system prompt on the same
-// input beside it.
+// input beside it. Each answer is checked as the site checks it: the sentences it would publish with the
+// reports they cite, the sentences it would drop and why, and whether enough is left to publish.
 //   Export events as a snapshot of cases (reads the database, calls no model):
 //     node --env-file=.env scripts/eval-story-digests.ts --stories <publicId,...> --out <file.jsonl>
 //   Run the cases:
@@ -11,6 +12,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
+import type { z } from "zod";
 import { REPO_ROOT } from "@aihot/backend/config";
 import { closeDb, sql } from "@aihot/backend/db";
 import { promptFromText } from "@aihot/backend/editorial/prompts";
@@ -24,6 +26,8 @@ import {
   digestComparisonMarkdown,
   inputForm,
   parseDigestEvalJsonl,
+  publishedOf,
+  sentenceCounts,
   toDigestInput,
   type DigestCall,
   type DigestEvalReport,
@@ -53,8 +57,8 @@ async function exportCases(list: string, out: string) {
   if (malformed.length) throw new Error(`not an event id (the part of its address after /story/): ${malformed.join(", ")}`);
   // One read-only snapshot: nothing is written, and every event is read as of the same moment.
   const cases = await sql.begin("isolation level repeatable read read only", async (tx) => {
-    const stories = await tx<{ id: number; public_id: string; title: string; has_digest: boolean }[]>`
-      SELECT s.id, s.public_id::text, s.title, EXISTS (SELECT 1 FROM story_digests d WHERE d.story_id = s.id) AS has_digest
+    const stories = await tx<{ id: number; public_id: string; title: string; digest: string | null; has_digest: boolean }[]>`
+      SELECT s.id, s.public_id::text, s.title, s.digest, EXISTS (SELECT 1 FROM story_digests d WHERE d.story_id = s.id) AS has_digest
       FROM stories s WHERE s.public_id = ANY(${ids}::uuid[]) AND s.merged_into IS NULL`;
     const found = new Map(stories.map((story) => [story.public_id, story]));
     const missing = ids.filter((id) => !found.has(id));
@@ -65,7 +69,7 @@ async function exportCases(list: string, out: string) {
     if (empty.length) throw new Error(`no listed report to write a digest from: ${empty.map((story) => story.public_id).join(", ")}`);
     return ids.map((id) => {
       const story = found.get(id)!;
-      return caseFromStory({ publicId: story.public_id, title: story.title, hasDigest: story.has_digest }, own(story));
+      return caseFromStory({ publicId: story.public_id, title: story.title, digest: story.digest, hasDigest: story.has_digest }, own(story));
     });
   });
   const file = path.resolve(REPO_ROOT, out);
@@ -116,7 +120,7 @@ async function evaluate() {
     const results = await pmap(tasks, concurrency, async ({ row, prompt }) => {
       const input = toDigestInput(row);
       const user = buildStoryDigestInput(input.story, input.reports, input);
-      let answer: { title: string; digest: string } | null = null;
+      let answer: z.infer<typeof DigestSchema> | null = null;
       let receiptId: number | null = null;
       let reused = false;
       let error: string | null = null;
@@ -139,9 +143,13 @@ async function evaluate() {
         receiptId = failedReceiptId(failure);
         error = String(failure).slice(0, 500);
       }
+      const published = answer ? publishedOf(row, answer.sentences) : null;
       const call: DigestCall = {
         title: answer?.title ?? null,
-        digest: answer?.digest ?? null,
+        kept: published?.kept ?? null,
+        dropped: published?.dropped ?? null,
+        digest: published?.digest ?? null,
+        published: published?.published ?? false,
         receiptId,
         reused,
         ...(await usageFor(receiptId === null ? [] : [receiptId])),
@@ -158,6 +166,7 @@ async function evaluate() {
         succeeded: own.filter((call) => call.error === null).length,
         errors: own.filter((call) => call.error !== null).length,
         reused: own.filter((call) => call.reused).length,
+        ...sentenceCounts(own),
         ...(await usageFor(own.flatMap((call) => (call.receiptId === null ? [] : [call.receiptId])))),
       };
     };
@@ -173,7 +182,8 @@ async function evaluate() {
         caseId: row.caseId,
         storyTitle: row.story.title,
         input: inputForm(row),
-        reports: row.reports.length,
+        reports: row.reports.map((r) => ({ id: r.id, publishedAt: r.publishedAt, source: r.source, title: r.title })),
+        siteDigest: row.story.siteDigest,
         live: callOf(row, "live")!,
         ...(values.system ? { candidate: callOf(row, "candidate")! } : {}),
       })),

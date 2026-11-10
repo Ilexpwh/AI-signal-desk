@@ -32,6 +32,45 @@ function Step({ title, meta, children, tone = "accent", last }: { title: ReactNo
   );
 }
 
+type Analysis = AdminContentChain["analyses"][number];
+const VERDICT = { supported: ["ok", "有依据"], unsupported: ["bad", "原文不支持"], unclear: ["warn", "说不清"] } as const;
+
+/** The copy checks of a judgement: recorded only, the copy readers see is as the model wrote it. */
+function CopyChecks({ guard, grounding }: { guard: Analysis["subject_guard"]; grounding: Analysis["grounding"] }) {
+  if (!guard && !grounding) return null;
+  const claims = grounding && "claims" in grounding ? grounding.claims : null;
+  const count = (verdict: keyof typeof VERDICT) => claims?.filter((c) => c.verdict === verdict).length ?? 0;
+  return (
+    <div className="mt-2 space-y-1.5 text-[12.5px]">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {guard?.outcome === "match" && <Badge tone="ok">标题主体与事实一致</Badge>}
+        {guard?.outcome === "mismatch" && <Badge tone="bad">标题写的是 {guard.titleEntities.join("、")}，事实主体是 {guard.factEntity}</Badge>}
+        {guard?.outcome === "unknown" && <Badge title={guard.factEntity ? `事实主体 ${guard.factEntity}，标题里认不出它` : "事实没有可认出的主体"}>主体未能核对</Badge>}
+        {grounding && "failed" in grounding && <Badge tone="warn">原文核对失败（{grounding.failed}）</Badge>}
+      </div>
+      {claims && (
+        <details open={count("unsupported") > 0} className="rounded-control bg-surface ring-1 ring-line">
+          <summary className="cursor-pointer select-none px-3 py-1.5 text-[12px] text-ink-3 hover:text-ink-2">
+            原文核对：有依据 {count("supported")} · 原文不支持 {count("unsupported")} · 说不清 {count("unclear")}
+          </summary>
+          <ul className="space-y-1.5 px-3 pb-3">
+            {claims.map((c, i) => (
+              <li key={i}>
+                <div className="flex flex-wrap items-baseline gap-1.5">
+                  <Badge tone={VERDICT[c.verdict][0]}>{VERDICT[c.verdict][1]}</Badge>
+                  <span className="text-ink-4">{c.part === "title" ? "标题" : "摘要"}</span>
+                  <span className="text-ink-2">{c.text}</span>
+                </div>
+                {c.quote && <div className="mt-0.5 text-[12px] leading-relaxed text-ink-4">原文：{c.quote}</div>}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
 type Dialog = null | "visibility" | "seo" | "override" | "analyze" | "extract" | "presentation" | "group" | "detach" | "merge";
 
 export default function ContentItem({ loaderData }: Route.ComponentProps) {
@@ -96,6 +135,11 @@ export default function ContentItem({ loaderData }: Route.ComponentProps) {
       <div className="mb-5 flex flex-wrap gap-1.5">
         {p ? <Badge tone={p.visibility === "public" ? "ok" : "warn"}>{VISIBILITY_LABEL[p.visibility] ?? p.visibility}</Badge> : <Badge>未公开</Badge>}
         {p?.selected && <Badge tone="accent">精选</Badge>}
+        {a.copy_of && (
+          <Link to={`/admin/content/${encodeURIComponent(a.copy_of)}`}>
+            <Badge tone="info" title={`沿用原文的判断，指纹相差 ${a.copy_distance} 位`}>转载</Badge>
+          </Link>
+        )}
         {p?.eligible === false && <Badge>不进公开面</Badge>}
         {a.backfill && <Badge tone="warn">历史回灌</Badge>}
         <Badge>处理 {a.processing_state}</Badge>
@@ -143,6 +187,11 @@ export default function ContentItem({ loaderData }: Route.ComponentProps) {
               </div>
             </Step>
             <Step title="模型判断" meta={`${c.analyses.length} 次`} tone={c.analyses.length ? "accent" : "muted"}>
+              {a.copy_of && (
+                <div className="mb-3 text-[12.5px] text-ink-3">
+                  转载：和<Link className="text-accent" to={`/admin/content/${encodeURIComponent(a.copy_of)}`}>原文</Link>的指纹相差 {a.copy_distance} 位，沿用原文的判断，没有调用模型，也不单独进公开池和精选。“重新评估”会按它自己的全文判断。
+                </div>
+              )}
               {c.analyses.length ? (
                 <div className="space-y-3">
                   {c.analyses.map((an) => (
@@ -156,6 +205,7 @@ export default function ContentItem({ loaderData }: Route.ComponentProps) {
                       </div>
                       {an.title_zh && <div className="mt-2 font-medium text-ink">{an.title_zh}</div>}
                       {an.reason_zh && <div className="mt-1 text-[12.5px] leading-relaxed text-ink-3">{an.reason_zh}</div>}
+                      <CopyChecks guard={an.subject_guard} grounding={an.grounding} />
                       {an.receipts.length > 0 && (
                         <div className="mt-2 flex flex-wrap gap-1.5 text-[11.5px]">
                           {an.receipts.map((r) => (
@@ -170,6 +220,20 @@ export default function ContentItem({ loaderData }: Route.ComponentProps) {
                 </div>
               ) : (
                 <span className="text-ink-4">{a.participation_mode === "editorial" ? "还没有判断（等待队列或失败）" : "氛围信源不做编辑判断"}</span>
+              )}
+              {c.copies.length > 0 && (
+                <div className="mt-3">
+                  <div className="text-[12px] text-ink-4">被转载 {c.copies.length} 次，转载沿用这条的判断</div>
+                  <ul className="mt-1 space-y-1">
+                    {c.copies.map((copy) => (
+                      <li key={copy.id} className="flex gap-2">
+                        <span className="num shrink-0 text-ink-4">{bj(copy.discovered_at)}</span>
+                        <Link className="min-w-0 flex-1 truncate text-ink hover:text-accent" to={`/admin/content/${encodeURIComponent(copy.id)}`}>{copy.title}</Link>
+                        <span className="shrink-0 text-ink-3">{copy.source_name} · 相差 {copy.distance} 位</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               )}
             </Step>
             <Step title="公开" tone={p ? (p.visibility === "withdrawn" ? "bad" : "accent") : "muted"} meta={p ? `更新于 ${bj(p.updated_at, true)}` : undefined}>

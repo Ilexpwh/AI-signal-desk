@@ -1,6 +1,8 @@
 // Article body extraction: readable text from the article page, or "unconfirmed" — never a wrong body.
-// Jina Reader is the budgeted fallback for pages that only render in a browser.
+// Readability reads the page, Defuddle where Readability finds no article; a page that only renders in a
+// browser goes to the self-hosted renderer when there is one, then to Jina Reader, the budgeted fallback.
 import { Readability } from "@mozilla/readability";
+import { DefuddleClass } from "defuddle/node";
 import { parseHTML } from "linkedom";
 import { sql } from "../db.ts";
 import { guardedFetch, languageHeaders } from "../lib/http-fetch.ts";
@@ -9,6 +11,7 @@ import { escapeXml, stripTags } from "../lib/text.ts";
 import { isVideoPageUrl } from "../lib/video-url.ts";
 import { jinaRead } from "../providers/jina.ts";
 import { BudgetExceededError } from "../providers/receipts.ts";
+import { renderPage } from "../providers/render.ts";
 import { getArticle } from "../providers/socialdata.ts";
 import { articleUtcOffset, readPublicationDate, type PublicationDate } from "../sources/dates.ts";
 import type { SourceRow } from "../sources/types.ts";
@@ -22,7 +25,8 @@ export interface ExtractedBody {
   html: string;
   text: string;
   images: Array<{ kind: "image"; url: string; width: number | null; height: number | null }>;
-  via: "readability" | "jina" | "text";
+  /** Which reader found the body; "render" is a page read from the self-hosted renderer's copy. */
+  via: "readability" | "defuddle" | "render" | "jina" | "text";
   /** The page's publication metadata; neither modification time nor dates mentioned in its prose. */
   publishedAt?: Date | null;
   publicationTime?: string | null;
@@ -774,16 +778,26 @@ export function readableDocument(document: Doc, url: string, rules: PageRules = 
   unwrapFigureBoxes(document);
   // A document theme is not an article candidate: names such as "header-dark" can discard the root.
   document.documentElement.removeAttribute("class");
-  const article = new Readability(document as unknown as ConstructorParameters<typeof Readability>[0], { charThreshold: MIN_BODY_CHARS, keepClasses: false }).parse();
-  if (!article?.content) return null;
-  const clean = trimTrailingChrome(sanitizeBody(withoutScreenReaderLinkText(article.content), url));
-  const text = stripTags(clean);
-  if (text.length < MIN_BODY_CHARS) return null;
-  try { assertPageContent(article.title ?? "", text); }
-  catch (error) {
+  // Readability changes the document it reads; Defuddle reads the page as prepared up to here.
+  const prepared = document.cloneNode(true) as Doc;
+  let article: ReturnType<Readability["parse"]> = null;
+  // Readability fails on some markup (neongd.com: no <head> or <body> tags, a TypeError in _grabArticle);
+  // that page is one it found no article in.
+  try { article = new Readability(document as unknown as ConstructorParameters<typeof Readability>[0], { charThreshold: MIN_BODY_CHARS, keepClasses: false }).parse(); }
+  catch { /* Defuddle reads it */ }
+  let found: { html: string; text: string; via: "readability" | "defuddle" } | null;
+  try {
+    found = article?.content ? storedBody(article.content, article.title ?? "", url, "readability") : null;
+    if (!found) {
+      const other = defuddleArticle(prepared, url);
+      found = other && storedBody(other.content, other.title, url, "defuddle");
+    }
+  } catch (error) {
     if (error instanceof UnavailablePageError) return null;
     throw error;
   }
+  if (!found) return null;
+  const { html: clean, text, via } = found;
   const images: ExtractedBody["images"] = [];
   for (const m of clean.matchAll(/<img\b[^>]*\bsrc="([^"]+)"[^>]*>/gi)) {
     const w = /\bwidth="(\d+)"/.exec(m[0]);
@@ -791,7 +805,35 @@ export function readableDocument(document: Doc, url: string, rules: PageRules = 
     images.push({ kind: "image", url: m[1]!.replace(/&amp;/g, "&"), width: w ? Number(w[1]) : null, height: h ? Number(h[1]) : null });
     if (images.length >= 12) break;
   }
-  return { html: clean, text, images, via: "readability", ...date, cover: hasPicture(clean) ? null : declared };
+  return { html: clean, text, images, via, ...date, cover: hasPicture(clean) ? null : declared };
+}
+
+/**
+ * A reader's article as a body is stored: cleaned, and null under MIN_BODY_CHARS. An error page (by the
+ * article's title and text) throws UnavailablePageError: no other reader is asked.
+ */
+function storedBody<V>(content: string, title: string, url: string, via: V): { html: string; text: string; via: V } | null {
+  const html = trimTrailingChrome(sanitizeBody(withoutScreenReaderLinkText(content), url));
+  const text = stripTags(html);
+  if (text.length < MIN_BODY_CHARS) return null;
+  assertPageContent(title, text);
+  return { html, text, via };
+}
+
+/**
+ * Defuddle's article on a page where Readability found none: it also reads the article's text in the
+ * page's schema.org data, a declarative shadow root, and markup Readability fails on. Only from the page
+ * itself: no requests of its own (useAsync), no replies a site
+ * extractor adds, and never its last resort, the whole page when it finds no content (_fallbackResponse,
+ * Defuddle 0.19), which is no article. Words kept for screen readers inside links go first, as they do
+ * from Readability's result.
+ */
+function defuddleArticle(document: Doc, url: string): { content: string; title: string } | null {
+  for (const el of document.querySelectorAll(`[${SCREEN_READER_MARK}]`)) el.remove();
+  const reader = new DefuddleClass(document as never, { url, useAsync: false, includeReplies: false });
+  Object.assign(reader, { _fallbackResponse: () => null });
+  const got = reader.parse() as ReturnType<typeof reader.parse> | null;
+  return got?.content ? { content: got.content, title: got.title ?? "" } : null;
 }
 
 export async function extractFromUrl(url: string, subject: string, rules: PageRules = {}, opts: { paidFallback?: boolean } = {}): Promise<ExtractedBody | null> {
@@ -815,7 +857,18 @@ export async function extractFromUrl(url: string, subject: string, rules: PageRu
       if (got) read = { body: got, pageUrl: res.url };
     }
   } catch {
-    // fall through to Jina
+    // fall through to the renderers
+  }
+  // The self-hosted renderer, like Jina after it, stands in for a direct read that found no body, and a
+  // caller that wants only the page as fetched (paidFallback: false) skips both.
+  if (!read && opts.paidFallback !== false) {
+    try {
+      const page = await renderPage(target.href);
+      const got = page && !isVideoPageUrl(page.url) && !isSignInRedirect(url, page.url) ? readable(page.html, page.url, rules) : null;
+      if (got) read = { body: { ...got, via: "render" }, pageUrl: page!.url };
+    } catch {
+      // fall through to Jina
+    }
   }
   // Outside the page's read: a failure of the store while checking the cover is no unreadable page.
   if (read) return { ...read.body, cover: await articleCover(read.body.cover ?? null, url, read.pageUrl) };
