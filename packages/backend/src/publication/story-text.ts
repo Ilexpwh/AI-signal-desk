@@ -3,10 +3,12 @@
 // public and unchanged; the latest development is the newest listed evidence.
 import { sql } from "../db.ts";
 import { evidenceCondition, listedCondition } from "./scope.ts";
-import { digestInputsHash, digestReports } from "./story-evidence.ts";
+import { digestInputsHash, digestReports, type DigestSentence } from "./story-evidence.ts";
 
 export interface StoryText {
   digest: string | null;
+  /** The digest sentence by sentence with the reports each cites; null for a version written before citations. */
+  citations: DigestSentence[] | null;
   digestUpdatedAt: Date | null;
   /** A saved event summary still supported verbatim by a current public report. */
   summary: string | null;
@@ -16,8 +18,8 @@ export interface StoryText {
 
 export async function storyTexts(storyIds: number[], now = new Date()): Promise<Map<number, StoryText>> {
   if (storyIds.length === 0) return new Map();
-  const rows = await sql<{ id: number; digest: string | null; digest_updated_at: Date | null; article_ids: string[] | null; inputs_hash: string | null; current: boolean; summary: string | null; latest_id: string | null; latest_title: string; latest_at: Date }[]>`
-    SELECT st.id, st.digest, st.digest_updated_at, saved.article_ids, saved.inputs_hash,
+  const rows = await sql<{ id: number; digest: string | null; digest_updated_at: Date | null; article_ids: string[] | null; inputs_hash: string | null; citations: DigestSentence[] | null; current: boolean; summary: string | null; latest_id: string | null; latest_title: string; latest_at: Date }[]>`
+    SELECT st.id, st.digest, st.digest_updated_at, saved.article_ids, saved.inputs_hash, saved.citations,
       CASE WHEN EXISTS (
         SELECT 1 FROM facts f JOIN fact_articles fa ON fa.fact_id = f.id JOIN publications p ON p.article_id = fa.article_id
         WHERE f.story_id = st.id AND p.summary = st.summary AND ${evidenceCondition()} AND ${listedCondition(now)}
@@ -29,7 +31,7 @@ export async function storyTexts(storyIds: number[], now = new Date()): Promise<
       ) AS current,
       latest.id AS latest_id, latest.title AS latest_title, latest.at AS latest_at
     FROM stories st LEFT JOIN LATERAL (
-      SELECT article_ids, inputs_hash, digest FROM story_digests WHERE story_id = st.id ORDER BY version DESC LIMIT 1
+      SELECT article_ids, inputs_hash, digest, citations FROM story_digests WHERE story_id = st.id ORDER BY version DESC LIMIT 1
     ) saved ON true LEFT JOIN LATERAL (
       SELECT p.article_id AS id, p.title, coalesce(p.published_at, p.discovered_at) AS at
       FROM facts f JOIN fact_articles fa ON fa.fact_id = f.id JOIN publications p ON p.article_id = fa.article_id
@@ -45,6 +47,7 @@ export async function storyTexts(storyIds: number[], now = new Date()): Promise<
       && digestInputsHash(reports.filter((p) => Number(p.story_id) === Number(r.id) && saved.has(p.id))) === r.inputs_hash;
     return [Number(r.id), {
       digest: current ? r.digest : null,
+      citations: current ? r.citations : null,
       digestUpdatedAt: current ? r.digest_updated_at : null,
       summary: r.summary,
       latest: r.latest_id ? { id: r.latest_id, title: r.latest_title, at: r.latest_at } : null,

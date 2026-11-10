@@ -1,10 +1,10 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { IntentLink } from "../components/ui/IntentLink";
 import { Link, useLoaderData, useLocation } from "react-router";
 import type { Route } from "./+types/story";
-import { STORY_INDEX_MIN_REPORTS, type StoryDetail, type StoryReportView } from "@aihot/contracts/site";
+import { STORY_INDEX_MIN_REPORTS, type StoryDetail, type StoryDigestSentence, type StoryReportView } from "@aihot/contracts/site";
 import { SITE } from "@aihot/site";
-import { linkMentions } from "@aihot/contracts/mentions";
+import { linkMentions, type MentionRun } from "@aihot/contracts/mentions";
 import { addressRuns } from "@aihot/contracts/addresses";
 import { MentionText } from "../components/ui/MentionText";
 import { cachedPage, loadOr404 } from "../lib/api.server";
@@ -98,6 +98,41 @@ function FirstReleaseBadge() {
   return <Badge tone="accent" title="官方或当事方账号对这件事最早的发布">首发</Badge>;
 }
 
+/**
+ * The digest paragraph by paragraph, each sentence followed by numbered marks to the reports it cites. `runs`
+ * are the sentences' texts with their mentions linked, one per sentence.
+ */
+function CitedDigest({ sentences, runs }: { sentences: StoryDigestSentence[]; runs: MentionRun[][] }) {
+  const paragraphs: number[][] = [];
+  sentences.forEach((s, i) => (i === 0 || s.newParagraph ? paragraphs.push([i]) : paragraphs.at(-1)!.push(i)));
+  return (
+    <div className="space-y-[1.85em] text-[15px] leading-[1.85] text-ink-2">
+      {paragraphs.map((members) => (
+        <p key={members[0]}>
+          {members.map((i, j) => (
+            <Fragment key={i}>
+              {j > 0 && /[!-~]$/.test(sentences[i - 1]!.text) && " "}
+              <MentionText runs={runs[i] ?? []} />
+              {sentences[i]!.cites.length > 0 && (
+                <sup className="num ml-0.5 text-[10.5px] font-medium leading-none text-ink-4">
+                  {sentences[i]!.cites.map((c, k) => (
+                    <Fragment key={c.n}>
+                      {k > 0 && ","}
+                      <IntentLink viewTransition to={`/items/${c.id}`} title={`${c.sourceName}：${c.title}`} aria-label={`出处 ${c.n}：${c.sourceName}《${c.title}》`} className="px-px transition-colors hover:text-accent">
+                        {c.n}
+                      </IntentLink>
+                    </Fragment>
+                  ))}
+                </sup>
+              )}
+            </Fragment>
+          ))}
+        </p>
+      ))}
+    </div>
+  );
+}
+
 /** One report on the story timeline: time, source and marks, title, a summary that opens on demand. */
 function TimelineRow({ r }: { r: StoryReportView }) {
   const [open, setOpen] = useState(false);
@@ -187,7 +222,9 @@ export default function StoryPage() {
       : story.excerpt
         ? { label: "报道摘要", text: story.excerpt.text, note: `摘自 ${story.excerpt.sourceName}` }
         : null;
-  const [overviewRuns] = useMemo(() => linkMentions([overview?.text], story.mentions), [overview?.text, story.mentions]);
+  // A digest written with citations reads sentence by sentence, each followed by its marks.
+  const cited = story.digest ? story.digestSentences : null;
+  const overviewRuns = useMemo(() => linkMentions(cited ? cited.map((s) => s.text) : [overview?.text], story.mentions), [cited, overview?.text, story.mentions]);
   const showOfficial = () => {
     setFilter("official");
     goSection(SECTIONS.reports);
@@ -259,7 +296,11 @@ export default function StoryPage() {
           <Panel id={SECTIONS.overview} title="先了解这件事" right={overview?.label} className="order-1">
             {overview ? (
               <>
-                <p className="whitespace-pre-line text-[15px] leading-[1.85] text-ink-2"><MentionText runs={overviewRuns} /></p>
+                {cited ? (
+                  <CitedDigest sentences={cited} runs={overviewRuns} />
+                ) : (
+                  <p className="whitespace-pre-line text-[15px] leading-[1.85] text-ink-2"><MentionText runs={overviewRuns[0]!} /></p>
+                )}
                 {/* A wrong overview or a report that belongs to another story, reported with this page. */}
                 <p className="mt-2 text-[12px] text-ink-4" suppressHydrationWarning>
                   {overview.note && <>{overview.note} · </>}

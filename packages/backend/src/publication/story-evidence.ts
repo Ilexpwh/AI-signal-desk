@@ -23,6 +23,17 @@ export interface DigestReport {
   structured_fact: unknown;
 }
 
+/**
+ * A saved digest sentence (story_digests.citations): its words and the reports it cites, by article id. The
+ * digest column is these sentences joined; a version written before citations has none.
+ */
+export interface DigestSentence {
+  text: string;
+  reports: string[];
+  /** Opens a new paragraph. */
+  newParagraph: boolean;
+}
+
 /** Conditions stay next to their object and source quote; no ownership is inferred from subject tags. */
 export function digestFactEvidence(report: Omit<DigestReport, "story_id">) {
   const fact = report.structured_fact && typeof report.structured_fact === "object" ? report.structured_fact as Record<string, unknown> : {};

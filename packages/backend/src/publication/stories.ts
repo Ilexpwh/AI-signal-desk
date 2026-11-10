@@ -1,6 +1,6 @@
 // Stories (events) and the hot ranking through the public read layer. The website sees heat values;
 // v1 and MCP only see ranks and counts.
-import type { HeatPoint, HotResponse, StoryDetail, StoryReportView } from "@aihot/contracts/site";
+import type { HeatPoint, HotResponse, StoryDetail, StoryDigestSentence, StoryReportView } from "@aihot/contracts/site";
 import { SITE } from "@aihot/site";
 import { sql } from "../db.ts";
 import { shared } from "../lib/cache.ts";
@@ -12,6 +12,7 @@ import { compositeCondition, evidenceCondition, listedCondition, storyReportCond
 import { publicSourceName } from "./rules.ts";
 import { latestHotRanking, rankingExtras } from "./hot.ts";
 import { storyTexts } from "./story-text.ts";
+import type { DigestSentence } from "./story-evidence.ts";
 import { topicsOfStory } from "./topics.ts";
 import { mentionsIn } from "./mentions.ts";
 import { itemUrl, storyUrl, v1StoryApiUrl } from "./links.ts";
@@ -98,6 +99,22 @@ function reportView(r: ReportRow, firsts: Set<string>): StoryReportView {
     selected: r.selected,
     firstRelease: firsts.has(r.id),
   };
+}
+
+/** The digest's sentences with a numbered mark for each report they cite, numbered in order of first citation. */
+function citedDigest(sentences: DigestSentence[], reports: ReportRow[]): StoryDigestSentence[] {
+  const byId = new Map(reports.map((r) => [r.id, r]));
+  const numbers = new Map<string, number>();
+  return sentences.map((s) => ({
+    text: s.text,
+    newParagraph: s.newParagraph,
+    cites: s.reports.flatMap((id) => {
+      const r = byId.get(id);
+      if (!r) return [];
+      if (!numbers.has(id)) numbers.set(id, numbers.size + 1);
+      return [{ n: numbers.get(id)!, id, title: r.title, sourceName: publicSourceName(r.source_name) }];
+    }),
+  }));
 }
 
 /**
@@ -190,6 +207,7 @@ export async function loadStoryDetail(storyId: number, now = new Date()): Promis
     firstReportAt: firstReportAt.toISOString(),
     latestAt: latestAt.toISOString(),
     digest: text.digest,
+    digestSentences: text.citations ? citedDigest(text.citations, reports) : null,
     digestUpdatedAt: text.digestUpdatedAt?.toISOString() ?? null,
     summary: text.summary,
     excerpt,
