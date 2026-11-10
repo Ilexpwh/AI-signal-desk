@@ -33,11 +33,21 @@ export const isRelease = (category: string | null, tags: readonly string[]) => R
 /** Every name the vocabulary knows a company by. */
 export const entityNames = (e: (typeof ENTITIES)[string]) => [e.name, ...e.aliases, ...(e.orgNames ?? []), ...(e.otherNames ?? [])];
 
-const key = (value: string) => value.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, "");
+/** A name as entityIdentity compares it: case, width and spaces aside. */
+export const nameKey = (value: string) => value.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, "");
 /** Exact entity/alias only: mentions embedded in a sentence are not ownership. */
 export function entityIdentity(value: string | null | undefined): string | null {
   if (!value?.trim()) return null;
-  const normalized = key(value);
-  const matches = Object.entries(ENTITIES).filter(([id, entity]) => [id, ...entityNames(entity)].some((alias) => key(alias) === normalized));
+  const normalized = nameKey(value);
+  const matches = Object.entries(ENTITIES).filter(([id, entity]) => [id, ...entityNames(entity)].some((alias) => nameKey(alias) === normalized));
   return matches.length > 1 ? null : matches[0]?.[0] ?? null;
+}
+
+/** What separates the companies one fact subject names ("OpenAI、微软"). */
+export const SUBJECT_SEPARATORS = /[,，、;；+＋&＆/]/u;
+
+/** The names in a fact subject that are no company of the vocabulary: names it may be missing. */
+export function unmatchedSubjects(subject: string | null | undefined): string[] {
+  const names = subject?.split(SUBJECT_SEPARATORS).map((name) => name.trim()).filter(Boolean) ?? [];
+  return [...new Set(names.filter((name) => !entityIdentity(name)))];
 }

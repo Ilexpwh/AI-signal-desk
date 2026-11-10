@@ -31,6 +31,15 @@ export function feedCategoryLabel(key: PublicApiCategoryKey): string {
   return FEED_LABELS[key] ?? c.feedLabel ?? c.label;
 }
 
+/** The IPTC vocabulary a category's media topic code belongs to (RSS <category domain>). */
+export const IPTC_MEDIA_TOPICS = "http://cv.iptc.org/newscodes/mediatopic/";
+
+/** A public category's IPTC media topic, when the industry pack maps it to one (industry/taxonomy.ts iptc). */
+export function categoryIptc(key: string | null): { code: string; label: string } | null {
+  const c: { key: string; iptc?: { code: string; label: string } } | undefined = CATEGORIES.find((x) => x.key === key);
+  return c?.iptc ? { code: c.iptc.code, label: c.iptc.label } : null;
+}
+
 export function isCategoryKey(value: unknown): value is CategoryKey {
   return typeof value === "string" && (CATEGORY_KEYS as readonly string[]).includes(value);
 }

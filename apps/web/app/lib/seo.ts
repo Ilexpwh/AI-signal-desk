@@ -2,7 +2,7 @@
 // with the feed filters they carry. The site's name and wording come from site/site.ts;
 //; its address from SITE_URL.
 import type { MetaDescriptor } from "react-router";
-import { REPORT_NAMES, reportDateLabel, type ReportDetail, type StoryDetail, type TimelineFilters } from "@aihot/contracts/site";
+import { REPORT_NAMES, reportDateLabel, type EntityRef, type ReportDetail, type StoryDetail, type TimelineFilters } from "@aihot/contracts/site";
 import { isCategoryKey, isChannelKey } from "@aihot/contracts/taxonomy";
 import { SITE, subjectAfter, withSubject } from "@aihot/site";
 
@@ -209,8 +209,19 @@ export function itemListLd(path: string, name: string, titles: string[]) {
   };
 }
 
-/** An item page: the site's reading of a third-party report, based on (not claiming) the original. */
-export function articleLd(input: { path: string; headline: string; description?: string | null; publishedAt?: string | null; modifiedAt?: string | null; image?: string | null; basedOn?: string | null; section?: string[] }) {
+/** A company the page is about or names, tied to its Wikidata item when the site mapped one. */
+function entityLd(e: EntityRef) {
+  return { "@type": "Organization", name: e.name, ...(e.wikidata ? { sameAs: `https://www.wikidata.org/wiki/${e.wikidata}` } : {}) };
+}
+
+/**
+ * An item page: the site's reading of a third-party report, based on (not claiming) the original; `about` its
+ * subject companies, `mentions` the others its summary names.
+ */
+export function articleLd(input: {
+  path: string; headline: string; description?: string | null; publishedAt?: string | null; modifiedAt?: string | null; image?: string | null; basedOn?: string | null; section?: string[];
+  about?: EntityRef[]; mentions?: EntityRef[];
+}) {
   const base = siteUrl();
   const url = `${base}${input.path}`;
   const description = input.description?.trim();
@@ -228,6 +239,8 @@ export function articleLd(input: { path: string; headline: string; description?:
     ...(input.modifiedAt ? { dateModified: input.modifiedAt } : {}),
     ...(input.image ? { image: new URL(input.image, base).href } : {}),
     ...(input.section?.length ? { articleSection: input.section } : {}),
+    ...(input.about?.length ? { about: input.about.map(entityLd) } : {}),
+    ...(input.mentions?.length ? { mentions: input.mentions.map(entityLd) } : {}),
     isAccessibleForFree: true,
     author: siteOrganization(),
     publisher: siteOrganization(),

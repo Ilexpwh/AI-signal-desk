@@ -33,7 +33,7 @@ import {
   needsShortTweetTranslation, parseTranslateOutput, PREFILTER_SYSTEM, prefilterUser, translateInputOf, UNDERSTAND_SYSTEM, understandUser,
   type IdentityGuard,
 } from "./writing.ts";
-import { CATEGORY_GUIDE, CATEGORY_TAGS, ENTITIES, ENTITY_TAGS, ITEM_TYPES, normalizeTags, TOPIC_TAGS } from "./vocabulary.ts";
+import { CATEGORY_GUIDE, CATEGORY_TAGS, ENTITIES, ENTITY_TAGS, ITEM_TYPES, normalizeTags, TOPIC_TAGS, unmatchedSubjects } from "./vocabulary.ts";
 import { promptText, promptVersion } from "./prompts.ts";
 import { originalPostCopy } from "../content/posts.ts";
 import { wordingProblems } from "./wording.ts";
@@ -204,7 +204,10 @@ export const STRUCTURE_SYSTEM = promptText("structure", {
   entities: Object.entries(ENTITIES).map(([id, e]) => `${id}（${e.aliases.slice(0, 3).join("/")}）`).join("，"),
 });
 
-/** Keep only quotes present both in the original material and in the text the structure model saw. */
+/**
+ * Keep only quotes present both in the original material and in the text the structure model saw. The fact
+ * subject's names that are no company of the vocabulary are kept apart, for the admin's 未收录主体 list.
+ */
 export function normalizeStructure(data: z.infer<typeof StructureSchema>, a: AnalyzeInputArticle) {
   const visible = collapseWhitespace(buildMaterial(a));
   const originals = (a.xPost
@@ -228,7 +231,7 @@ export function normalizeStructure(data: z.infer<typeof StructureSchema>, a: Ana
   return {
     category: data.category, tags: normalizeTags(data.tags),
     subjects: [...new Set(data.subjects.map((s) => s.trim().toLowerCase()).filter((s) => s in ENTITIES))],
-    scope, fact,
+    scope, fact, unmatchedSubjects: unmatchedSubjects(fact?.subject),
   };
 }
 
@@ -595,6 +598,7 @@ export function normalizeAnalysis(run: AnalysisRun) {
     reasonZh: run.writing?.reasonZh ?? null,
     scope: run.structure?.scope ?? "unknown",
     fact: run.structure?.fact ?? null,
+    unmatchedSubjects: run.structure?.unmatchedSubjects ?? [],
   };
 }
 
@@ -629,7 +633,7 @@ export async function analyzeArticle(articleId: string, opts: StepOpts = {}): Pr
     scores: out.scores, scoreAxes: out.scoreAxes, scoreModel: out.scoreModel, threshold: out.threshold, ...(out.scoreRefused ? { scoreRefused: true } : {}),
     ...(w ? { writer: w.kind, writerModel: w.model, itemType: w.itemType ?? null, authorRole: w.authorRole ?? null } : {}),
     ...(w?.identityGuard?.outcome === "fallback" ? { identityGuard: w.identityGuard } : {}),
-    scope: out.scope, fact: out.fact,
+    scope: out.scope, fact: out.fact, ...(out.unmatchedSubjects.length ? { unmatchedSubjects: out.unmatchedSubjects } : {}),
   };
   // A later reprint from another source is told by this fingerprint (editorial/copies.ts).
   const simhash = fingerprint(copyText(input));

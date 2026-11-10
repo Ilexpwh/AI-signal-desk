@@ -89,6 +89,13 @@ COMPOSE_PROFILES=render
 
 ### 更新
 
+**未收录主体、Wikidata 和 IPTC（AI-signal-desk）**：没有数据库迁移，没有新环境变量，不调用模型，已存的数据不用改。说明见 [把它改成你的行业](customize.md#2-分类标签和主题industrytaxonomytsindustrytopicsjson)。要注意：
+
+- **未收录主体**：之后的判断把事实主体里对不上 `ENTITIES` 的名字记在 `output.unmatchedSubjects`；后台“内容诊断”页不输入搜索词时列出近 30 天出现 3 篇以上的。升级前判过的资料没有这项，列表要随新资料慢慢攒起来。
+- **`industry/taxonomy.ts` 多了两个选填字段**：`ENTITIES` 的 `wikidata`（`"Q…"`）和 `CATEGORIES` 的 `iptc`（`{ code, label }`）。示范包两项都没填，不填时网站、接口和 RSS 都和原来一样。自己改过这个文件的不用补。新脚本 `scripts/wikidata-entities.ts` 只打印候选，不改文件。
+- **文章页的结构化数据**多了 `about`（主体公司）和 `mentions`（摘要提到的其他公司），填了 `wikidata` 的带 `sameAs`。网站接口 `/api/site/items/<id>` 多了 `entities`。
+- **公开接口只加字段**：填了 `iptc` 的类别，`/api/v1/items`、精选快照和变更（默认字段）以及 MCP 的最新、搜索结果，每条多一个 `iptc`；RSS 每条多一个 domain 是 `http://cv.iptc.org/newscodes/mediatopic/` 的 `<category>`。`interfaceVersion` 不变，OpenAPI 已同步。
+
 **正文提取在 Jina 之前多了两道免费的读法（AI-signal-desk）**：Readability 读不出文章的页面，先用 Defuddle（新依赖 `defuddle` 0.19.6，MIT）再读一次；原文页抓不到或都读不出时，配了 `RENDER_URL` 的先交给自己跑的 Crawl4AI 渲染，最后才用 Jina，见 [用自己的浏览器渲染正文](#用自己的浏览器渲染正文)。没有数据库迁移；不设 `RENDER_URL` 就不会调用渲染服务。只作用于之后抽取的正文，已存的正文不变，升级不批量重新抽取。`docker-compose.yml` 多了一个 `render` 网络，worker 接在上面；不带 `--profile render` 启动时，这个网络上只有 worker。
 
 **主题的“上升中”（AI-signal-desk）**：迁移 `0130` 新建 `topic_trends` 表，照下面的命令更新时 setup 会跑它，不改已有的数据。worker 多了每天 00:20 的定时任务 `topics.trend`：按北京时间的日子数每个主题有多少个事件被 `editorial` 信源报道、占当天全部这类事件的比例，和它前 28 天的平均比，见 [把它改成你的行业](customize.md#2-分类标签和主题industrytaxonomytsindustrytopicsjson)。不调用模型，没有新环境变量。要注意：

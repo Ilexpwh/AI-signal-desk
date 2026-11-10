@@ -1,6 +1,6 @@
 // A source's T1 label and its authority to speak for an event are separate inputs.
 import { sql } from "../db.ts";
-import { entityIdentity } from "../editorial/vocabulary.ts";
+import { entityIdentity, SUBJECT_SEPARATORS } from "../editorial/vocabulary.ts";
 
 export interface RepresentativeIdentity {
   source_tier: string;
@@ -15,7 +15,7 @@ export const REPRESENTATIVE_COLUMNS = sql`s.tier AS source_tier, s.config->>'pub
 export function representativePriority(row: Partial<RepresentativeIdentity>): number {
   if (row.source_tier === "T1") return 0;
   const owner = entityIdentity(row.owner_entity_id);
-  const subjects = row.fact_subject?.split(/[,，、;；+＋&＆/]/u).map((subject) => entityIdentity(subject)) ?? [];
+  const subjects = row.fact_subject?.split(SUBJECT_SEPARATORS).map((subject) => entityIdentity(subject)) ?? [];
   if (!owner || subjects.some((subject) => !subject) || !subjects.includes(owner)) return 3;
   if (row.publisher_role === "organization") return 1;
   if (row.publisher_role === "person") return 2;
